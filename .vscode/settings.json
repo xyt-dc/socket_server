@@ -1,0 +1,84 @@
+{
+    // ========================================================================
+    //  工作区设置 —— 让 C++ 补全重新工作
+    // ========================================================================
+    //
+    //  【问题根因】（查日志查出来的，不是猜的）
+    //  你装了两个 C++ 语言服务，它们互相打架：
+    //
+    //    clangd   (llvm-vs-code-extensions.vscode-clangd 0.6.0)  ← 太老
+    //    cpptools (ms-vscode.cpptools 1.34.4)                     ← 正常
+    //
+    //  1) clangd 的 detectExtensionConflicts 默认开，它会去把 cpptools 的
+    //     IntelliSense 关掉（日志 4-CC++.log 原文："已禁用 intelliSenseEngine"）
+    //  2) clangd 0.6.0 在 VSCode 1.144 下初始化就挂了：
+    //     [error] PendingMigrationError: navigator is now a global in nodejs
+    //     [error] [llvm-vs-code-extensions.vscode-clangd] provider FAILED
+    //  3) 结果：clangd 不干活 + cpptools 被禁 = 完全没有补全
+    //
+    //  证据：clangd 日志里 textDocument/completion 请求数 = 0，
+    //        而 semanticTokens / hover / foldingRange 都有请求。
+    //        （clangd 二进制本身是好的，我用 raw LSP 单独测过能返回 vector）
+    //
+    //  【本文件做的事】让 clangd 彻底闭嘴，全部交给 cpptools
+    // ========================================================================
+
+    // ---- 1. 掐掉 clangd 的全部功能 ------------------------------------
+    // 光"禁用扩展"在某些版本不彻底，用配置项逐项关，保证它不抢 provider
+    "clangd.enable": false,
+    "clangd.enableCodeCompletion": false,
+    "clangd.enableHover": false,
+    "clangd.semanticHighlighting": false,
+    "clangd.detectExtensionConflicts": false,
+
+    // ---- 2. 让 cpptools 重新接管 IntelliSense -------------------------
+    // "default" = 用 cpptools 自己的引擎（clangd 之前把它改成了 "disabled"）
+    "C_Cpp.intelliSenseEngine": "default",
+
+    // ---- 3. 补全行为（"打 cl 就弹选择框"就是这个控制的）--------------
+    "editor.quickSuggestions": {
+        "other": "on",
+        "comments": "on",
+        "strings": "on"
+    },
+    "editor.quickSuggestionsDelay": 10,        // 打字立刻弹，不等防抖
+    "editor.suggestOnTriggerCharacters": true, // 输入 . ( :: 时自动弹
+    "editor.suggestSelection": "recentlyUsedByPrefix",
+    "editor.tabCompletion": "on",              // Tab 也能接受建议
+    "editor.snippetSuggestions": "top",
+    "editor.wordBasedSuggestions": "matchingDocuments",
+
+    // ---- 4. C/C++ 专属 ------------------------------------------------
+    "[cpp]": {
+        "editor.quickSuggestions": {
+            "other": "on",
+            "comments": "on",
+            "strings": "on"
+        },
+        "editor.defaultFormatter": "ms-vscode.cpptools"
+    },
+    "[c]": {
+        "editor.quickSuggestions": {
+            "other": "on",
+            "comments": "on",
+            "strings": "on"
+        },
+        "editor.defaultFormatter": "ms-vscode.cpptools"
+    },
+    "files.associations": {
+        "*.hpp": "cpp",
+        "*.h": "cpp"
+    },
+
+    // ---- 5. cpptools 的编译参数来源 -----------------------------------
+    // 走 compile_commands.json（CMakeLists 里 CMAKE_EXPORT_COMPILE_COMMANDS ON 生成的）
+    // 这样 -I / -std 跟 CMake 完全一致
+    "C_Cpp.default.compileCommands": "${workspaceFolder}/compile_commands.json",
+    "C_Cpp.default.cppStandard": "c++17",
+    "C_Cpp.default.intelliSenseMode": "linux-gcc-x64",
+    "C_Cpp.default.compilerPath": "/usr/bin/g++",
+
+    // ---- 6. 报错提示 ---------------------------------------------------
+    "C_Cpp.errorSquiggles": "enabled",
+    "C_Cpp.autocompleteAddParentheses": true
+}

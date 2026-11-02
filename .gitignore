@@ -1,0 +1,20 @@
+# 构建产物
+build/
+cmake-build-*/
+
+# 编译数据库（本机路径，机器相关）
+compile_commands.json
+
+# 编辑器 / 索引缓存
+.cache/
+.vscode/*
+!.vscode/settings.json
+!.vscode/c_cpp_properties.json
+!.vscode/tasks.json
+!.vscode/launch.json
+
+# 测试二进制与日志
+test/bq_*
+*.o
+*.o.d
+a.out
