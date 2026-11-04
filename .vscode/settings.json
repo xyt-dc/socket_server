@@ -81,4 +81,10 @@
     // ---- 6. 报错提示 ---------------------------------------------------
     "C_Cpp.errorSquiggles": "enabled",
     "C_Cpp.autocompleteAddParentheses": true
+
+    // ---- 7. 关于背景图 ------------------------------------------------
+    // 这里【故意】不写任何 background.* 配置。
+    // 工作区设置优先级高于用户设置，一旦在这里写了 background.fullscreen，
+    // 你在本机用户设置里换图就会被静默覆盖（表现：改了图片路径但没反应）。
+    // 背景图统一放到本机：~/Library/Application Support/Code/User/settings.json
 }

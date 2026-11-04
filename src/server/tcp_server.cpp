@@ -48,11 +48,13 @@ void TcpServerBase::do_listen(){
 
 int TcpServerBase::accept_once(struct sockaddr_in &server_addr){
     socklen_t len = sizeof(server_addr);
-    int accept_res = accept(_listen_fd, (struct sockaddr *)&server_addr,&len);
-    if(accept_res < 0) {
-        perror("accept failed");
-    }
-    return accept_res;
+    //不对在于这里异常一抛我的那套错误状态机根本没机会跑后面就全乱了
+    // int accept_res = accept(_listen_fd, (struct sockaddr *)&server_addr,&len);
+    // if(accept_res < 0) {
+    //     throw std::runtime_error("accept failed ");
+    // }
+    // return accept_res;
+    return accept(_listen_fd,(struct sockaddr *)&server_addr,&len);
 }
 void TcpServerBase::handle_client_read(int client_fd){
     char buf[1024] = {0};

@@ -1,4 +1,5 @@
 #include "mthread/pthread_server.hpp"
+#include "mthread/thread_pool_server.hpp"
 #include "server/tcp_server.hpp"
 
 #include <csignal>
@@ -33,7 +34,7 @@ int main(int argc, char** argv) {
         }
     }
 
-    ThreadPerConnServer server(port);
+    ThreadPerConnServer server(port);//主要在这里切换
 
     // 业务回调：原样回写（echo），方便用 nc / telnet 手动验证
     server.set_message_callback([](int fd, const char* data, size_t len) {

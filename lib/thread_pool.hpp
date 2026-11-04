@@ -88,6 +88,7 @@ public:
          *   - lambda 里用 std::apply 把 tuple 拆开喂给 f
          *   - 全程都是移动，unique_ptr 也能过
          */
+        //单线程多链接有三种解决方案：async、packaged—task + get-future（）、promise
         auto task = std::make_shared<std::packaged_task<return_type()>>(
             [f = std::forward<F>(f),
              tup = std::make_tuple(std::forward<Args>(args)...)]() mutable {
