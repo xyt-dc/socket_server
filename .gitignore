@@ -15,6 +15,7 @@ compile_commands.json
 
 # 测试二进制与日志
 test/bq_*
+test/pooltest
 *.o
 *.o.d
 a.out
