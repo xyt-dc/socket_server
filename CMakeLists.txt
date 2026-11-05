@@ -20,3 +20,18 @@ target_include_directories(socket_server PRIVATE
 # std::thread 需要链接 pthread
 find_package(Threads REQUIRED)
 target_link_libraries(socket_server PRIVATE Threads::Threads)
+
+# 压测专用入口：支持 --server=thread|pool 运行时切换模型
+# 单独一个 target，src/main.cpp 保持原样不动
+add_executable(bench_server
+    test/bench_server.cpp
+    src/server/tcp_server.cpp
+    src/server/tcp_server.hpp
+)
+
+target_include_directories(bench_server PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/lib
+)
+
+target_link_libraries(bench_server PRIVATE Threads::Threads)

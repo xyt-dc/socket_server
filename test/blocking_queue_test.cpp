@@ -16,10 +16,16 @@
  *      （外层脚本还有 timeout 兜底）
  *   3. MPMC 用例故意把容量压到 8、消息量拉到 10 万，
  *      强制两个条件变量进入最激烈的等待/唤醒循环
+ *
+ * 【为什么 IoThreadPool 也在这个文件里测】
+ *   Iothread_pool.hpp 是纯头文件，只依赖 blocking_queue.hpp，
+ *   而且它的 try_run_one() 正确性完全建立在 BlockingQueue::try_pop() 之上。
+ *   放在一起测，才能保证"队列的非阻塞语义"和"基于它的调度语义"同时成立。
  * ============================================================================
  */
 
 #include "blocking_queue.hpp"
+#include "Iothread_pool.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -289,6 +295,198 @@ void test_capacity_guard() {
     check(custom.capacity() == 64, "自定义容量 64");
 }
 
+// ---------------------------------------------------------------------------
+//  用例 11：try_pop 的非阻塞语义
+//    这是 epoll reactor 线程唯一能用的取任务方式 —— 它绝对不能睡眠，
+//    否则没人 epoll_wait，整个服务器停摆。
+// ---------------------------------------------------------------------------
+void test_try_pop() {
+    std::puts("[11] try_pop 非阻塞语义");
+
+    // --- 11.1 空队列立即返回 false（这一条抓的是"用 pop 实现 try_pop"的退化） ---
+    {
+        BlockingQueue<int> q(4);
+        auto t0 = Clock::now();
+        int v = -1;
+        bool ok = q.try_pop(v);
+        long long cost = ms_since(t0);
+        check(!ok, "空队列 try_pop 返回 false");
+        check(cost < 50, "空队列 try_pop 不阻塞（实测 " + std::to_string(cost) + "ms）");
+
+        // 若是空 deque 上硬调 front()/pop_front()，-O2 下会崩；能走到这里说明没越界
+        check(q.size() == 0, "失败时没有误改 size()");
+    }
+
+    // --- 11.2 连续 try_pop 必须是【不同】元素（抓漏掉 pop_front 的 bug） ---
+    //   漏了 pop_front 时的表现：每次都 front() 同一个位置，
+    //   第一次 move 走之后那块内存已被掏空 —— 表现为重复值，或 std::string 变空。
+    {
+        BlockingQueue<std::string> q(8);
+        (void)q.push(std::string("a"));
+        (void)q.push(std::string("b"));
+        (void)q.push(std::string("c"));
+
+        std::string s1, s2, s3, s4;
+        bool r1 = q.try_pop(s1);
+        bool r2 = q.try_pop(s2);
+        bool r3 = q.try_pop(s3);
+        bool r4 = q.try_pop(s4);   // 队列已空
+
+        check(r1 && r2 && r3, "连续 3 次 try_pop 都返回 true");
+        check(s1 == "a" && s2 == "b" && s3 == "c",
+              "依次取到 a/b/c，元素不重复也不跳过（漏 pop_front 会在这里暴露）");
+        check(!r4, "第 4 次 try_pop（空）返回 false");
+        check(q.size() == 0, "size() 已归零 —— 证明元素真的被摘掉了");
+    }
+
+    // --- 11.3 close 后仍能取完残留，取完才返回 false ---
+    //   语义必须和 pop 一致：close 只阻止新数据进入，不丢弃已有数据。
+    {
+        BlockingQueue<int> q(8);
+        for (int i = 0; i < 3; ++i) (void)q.push(i);
+        q.close();
+
+        int a = -1, b = -1, c = -1, d = -1;
+        bool r1 = q.try_pop(a);
+        bool r2 = q.try_pop(b);
+        bool r3 = q.try_pop(c);
+        bool r4 = q.try_pop(d);
+        check(r1 && r2 && r3 && a == 0 && b == 1 && c == 2,
+              "close 后仍能取出 3 个残留元素且顺序正确");
+        check(!r4, "残留取完且已 close 时返回 false");
+        check(q.closed(), "closed() 反映 close 状态");
+    }
+
+    // --- 11.4 try_pop 腾出的空间必须唤醒阻塞中的生产者 ---
+    //   这条验证 _not_full.notify_one() 该在 try_pop 里发（而不是 _not_empty）。
+    {
+        BlockingQueue<int> q(1);
+        (void)q.push(0);            // 队列满
+
+        std::atomic<bool> pushed{false};
+        std::atomic<bool> ret{false};
+        std::thread producer([&] {
+            ret.store(q.push(99));  // 应该阻塞在这里
+            pushed.store(true);
+        });
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        check(!pushed.load(), "容量 1 且已满：push 确实阻塞了");
+
+        int v = -1;
+        bool ok = q.try_pop(v);
+        check(ok && v == 0, "try_pop 取出唯一元素");
+
+        check(wait_flag(pushed, 1000), "生产者被 try_pop 唤醒");
+        check(ret.load(), "被唤醒后 push 成功返回 true");
+
+        int w = -1;
+        (void)q.pop(w);
+        check(w == 99, "新推入的元素是 99，没有被覆盖");
+        producer.join();
+    }
+}
+
+// ---------------------------------------------------------------------------
+//  用例 12：IoThreadPool::try_run_one —— reactor 线程"顺手干活"的能力
+//   契约（写在 Iothread_pool.hpp 里）：有活就执行一个返回 true，
+//   没活立刻返回 false，绝不阻塞。
+// ---------------------------------------------------------------------------
+void test_try_run_one() {
+    std::puts("[12] IoThreadPool::try_run_one");
+
+    // --- 12.1 空池（0 worker）返回 false 且不阻塞 ---
+    {
+        IoThreadPool pool(0, 8);
+        auto t0 = Clock::now();
+        bool ok = pool.try_run_one();
+        long long cost = ms_since(t0);
+        check(!ok, "空队列 try_run_one 返回 false");
+        check(cost < 50, "空队列 try_run_one 不阻塞（实测 " + std::to_string(cost) + "ms）");
+    }
+
+    // --- 12.2 有活时返回 true，且任务在当前线程立即执行 ---
+    //   用 thread::id 断言"谁在执行"：证明是调用者线程干的，
+    //   而不是被某个 worker 抢走了（池子是 0 worker，抢不走）。
+    {
+        IoThreadPool pool(0, 8);
+        std::atomic<int> hit{0};
+        std::atomic<bool> ran_on_caller{false};
+        const auto caller = std::this_thread::get_id();
+
+        (void)pool.submit([&] {
+            ran_on_caller.store(std::this_thread::get_id() == caller);
+            hit.fetch_add(1);
+        });
+
+        bool ok = pool.try_run_one();
+        check(ok, "有任务时 try_run_one 返回 true");
+        check(hit.load() == 1, "任务副作用已发生（执行了 1 次）");
+        check(ran_on_caller.load(), "任务在【调用者线程】上执行 —— reactor 线程确实会亲自干活");
+
+        // 队列已空，再调应该 false
+        check(!pool.try_run_one(), "队列清空后返回 false");
+        check(hit.load() == 1, "没有重复执行同一个任务（漏 pop_front 会让它变成 2）");
+    }
+
+    // --- 12.3 连续调用能把队列逐个排空，且每个任务只执行一次 ---
+    //   reactor 的典型用法就是 while (_running && pool.try_run_one()) {}，
+    //   所以"能排空 + 不重复"是必须的。
+    {
+        IoThreadPool pool(0, 64);
+        constexpr int N = 20;
+        std::atomic<int> count{0};
+        for (int i = 0; i < N; ++i) {
+            (void)pool.submit([&] { count.fetch_add(1); });
+        }
+
+        int drained = 0;
+        while (pool.try_run_one()) ++drained;
+
+        check(drained == N, "while(try_run_one()) 排空了 " + std::to_string(drained) + "/" + std::to_string(N) + " 个任务");
+        check(count.load() == N, "每个任务恰好执行一次（不漏不重）");
+        check(pool.queue_size() == 0, "队列已空");
+    }
+
+    // --- 12.4 任务抛异常不能穿透，返回值仍是 true（活儿确实干了） ---
+    {
+        IoThreadPool pool(0, 8);
+        (void)pool.submit([] { throw std::runtime_error("boom"); });
+
+        bool ok = false;
+        bool escaped = false;
+        try {
+            ok = pool.try_run_one();
+        } catch (...) {
+            escaped = true;
+        }
+        check(!escaped, "任务抛的异常没有逃出 try_run_one");
+        check(ok, "异常任务仍被算作『已执行』，返回 true");
+        check(!pool.try_run_one(), "异常后队列已空，返回 false");
+    }
+
+    // --- 12.5 与 worker 并发：try_run_one 和 N 个 worker 一起抢，总数必须守恒 ---
+    //   这条是回归防线：将来给 try_run_one 加锁加了 bug（比如漏 pop_front），
+    //   MPMC 守恒断言会立刻炸。
+    {
+        constexpr int W = 4;
+        constexpr int N = 5000;
+        IoThreadPool pool(W, 256);
+        std::atomic<int> count{0};
+
+        for (int i = 0; i < N; ++i) {
+            (void)pool.submit([&] { count.fetch_add(1); });
+        }
+        // 主线程陪着抢一会儿
+        for (int i = 0; i < 200; ++i) (void)pool.try_run_one();
+
+        pool.shutdown();
+        check(count.load() == N,
+              "4 worker + 主线程抢 5000 个任务，恰好执行 " +
+              std::to_string(count.load()) + "/" + std::to_string(N) + " 次");
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -304,6 +502,8 @@ int main() {
     test_push_blocks_when_full();
     test_close_unblocks_full_producer();
     test_capacity_guard();
+    test_try_pop();
+    test_try_run_one();
 
     std::printf("========================================================\n");
     std::printf("  PASS: %d    FAIL: %d\n", g_pass, g_fail);

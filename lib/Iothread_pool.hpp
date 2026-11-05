@@ -59,6 +59,32 @@ public:
         });
     }
 
+    // ★ 调用方契约：必须在 IoThreadPool 析构【之前】停止调用本函数。
+//   pool 内部保证 _tasks 比 _workers 活得久，所以只要对象还在，
+//   和 shutdown() 并发调用是安全的（close 后非空队列仍会被执行，这是排空语义）。
+//   但 shuttle 本身的生命周期由调用方负责 —— 析构后再调 = this 悬空。
+//
+// ★ 架构约束：本函数会让【调用者线程】执行池里的任意任务。
+//   只有当池里全是"短任务"时才安全；混进一个阻塞任务（比如
+//   while(true) recv 的 handle_client_read），reactor 线程就会被卡死，
+//   整个服务器停止 accept。
+//   而"任务短"恰恰是 epoll 提供的 —— 这两个东西必须配对使用。
+    bool try_run_one(){
+        Task out;
+        auto ok = _tasks.try_pop(out);
+        if (!ok){
+            return false;
+        }
+        try{
+            out();
+        }catch(const std::exception& e){
+            std::cerr << e.what() << '\n';
+        }catch (...) {
+            std::cerr << "task threw unknown\n";
+        }
+        return true;
+    }
+
     size_t worker_count() const { return _workers.size(); }
     size_t queue_size()   const { return _tasks.size(); }
     size_t queue_cap()    const { return _tasks.capacity(); }
@@ -92,3 +118,4 @@ private:
     std::vector<std::thread> _workers;
     std::once_flag _once;      // ← 新增
 };
+

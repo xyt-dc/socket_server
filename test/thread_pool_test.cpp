@@ -1,4 +1,4 @@
-#include "thread_pool.hpp"
+#include "thread_pool_v2.hpp"
 #include <iostream>
 #include <chrono>
 
@@ -29,7 +29,7 @@ int main(){
     std::cout << "硬件线程数: " << thread_count << "\n";
     std::cout << "任务总数:   " << task_count << "\n\n";
 
-    Classical_ThreadPool pool(thread_count);
+    ThreadPool_v2 pool(thread_count);
     // 注意：这里必须是 reserve 而不是 vector(task_count)。
     // vector(task_count) 会先构造 task_count 个【无效】future，
     // 后面 push_back 又把新 future 追加到末尾，于是总共 2*task_count 个元素，

@@ -98,6 +98,18 @@ public:
          return true;
     }
 
+    bool try_pop(T& out){
+        std::unique_lock<std::mutex> lk(_mtx);
+        if (_queue.empty()){
+            return false;
+        }
+        out = std::move(_queue.front());
+        _queue.pop_front();
+        lk.unlock();
+        _not_full.notify_one();
+        return true;
+    }
+
     //关闭连接时，置标志位+叫醒所有等待者
     void close(){
         {
