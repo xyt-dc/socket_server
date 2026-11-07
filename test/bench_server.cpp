@@ -28,6 +28,7 @@
 #include "server/tcp_server.hpp"
 #include "mthread/pthread_server.hpp"
 #include "mthread/thread_pool_server.hpp"
+#include "mthread/Epoll_server.hpp"
 
 #include <csignal>
 #include <cstdlib>
@@ -96,6 +97,8 @@ int main(int argc, char** argv) {
         server = std::make_unique<ThreadPerConnServer>(port);
     } else if (model == "pool") {
         server = std::make_unique<ThreadPool_server>(port, workers, queue_cap);
+    }else if (model == "epoll"){
+        server = std::make_unique<EpollServer>(port);
     } else {
         std::cerr << "unknown server model: " << model << "\n";
         return 2;

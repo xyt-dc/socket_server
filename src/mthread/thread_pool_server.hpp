@@ -158,6 +158,7 @@ private:
         }
     }
     
+    //这里写int有隐患，但是我不知道什么原理，反正reactor肯定会产生问题
     std::unordered_set<int> _clients;
     std::mutex _mtx;
     std::atomic<uint64_t> _reject_count{0};//暂时不用，压测的时候把他打印出来
