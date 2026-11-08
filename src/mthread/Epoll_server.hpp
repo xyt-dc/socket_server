@@ -6,9 +6,11 @@
 #include "Connection.hpp"
 #include "epoll.hpp"
 #include <chrono>
+#include <cerrno>
+#include <fcntl.h>
 
 /**
- * g++ -std=c++17 -fsyntax-only -I./lib -I./src src/mthread/IO_server.hpp
+ * g++ -std=c++17 -fsyntax-only -I./lib -I./src src/mthread/Epoll_server.hpp
  * 
  */
 
@@ -25,8 +27,8 @@ public:
     
     EpollServer(int port):TcpServerBase(port){}
     ~EpollServer(){
-        if (_epfd >= 0){
-            ::close(_epfd);
+        if (_epoll.get()->get_fd() >= 0){
+            ::close(_epoll.get()->get_fd());
         }
     }
 
@@ -54,12 +56,16 @@ protected:
             }
             //while (_pool.try_run_one())
         }
-       
-
     }
 
 private:
     bool epoll_init(){
+        event_poll.reserve(kMaxEvents);
+
+        //设置listen_fd为非阻塞模式
+        int flags = fcntl(_listen_fd,F_GETFL);
+        fcntl(_listen_fd,F_SETFL,flags|O_NONBLOCK);
+
         //初始化一个epoll实例
         _epoll = std::make_unique<Epoll>(EPOLL_CLOEXEC,64);
         return  _epoll.get()->add(_listen_fd);
@@ -74,7 +80,6 @@ private:
                 if (errno == EAGAIN || errno == EWOULDBLOCK) { break; }  // 队列空了，正常
                 if (errno == EINTR) { continue; }                        // 信号打断
                 if (errno == EMFILE || errno == ENFILE) {
-                    // fd 耗尽：★ 绝对不能 continue（会 580,941 行日志那种忙等）
                     std::cerr << "fd exhausted: " << std::strerror(errno) << '\n';
                     break;
                 }
@@ -97,6 +102,9 @@ private:
             int n = ::recv(fd,buf,sizeof(buf),0);
             if (n > 0) {
                 if (_msg_cb) _msg_cb(fd, buf, static_cast<size_t>(n));
+            }else if(n == 0){
+                del_and_close(fd);
+                return;
             }else {
                 if (errno == EINTR) continue; // 被信号打断，重试
                 if (errno == EAGAIN || errno == EWOULDBLOCK){
@@ -109,7 +117,7 @@ private:
     }
     void handle_write(int fd){
         //?
-    }
+    } 
 
     void del_and_close(int fd){
         _epoll.get()->del(fd);
@@ -117,7 +125,7 @@ private:
         _conns.erase(fd);
     }
     std::unique_ptr<Epoll> _epoll;
-    int _epfd = -1;
+    //int _epfd = -1;
     //IoThreadPool _pool;
     //map用于通过文件描述符（fd）快速查找对应 epoll_item（监听事件）的关联结构。
     std::unordered_map<int,std::shared_ptr<Connection>> _conns;

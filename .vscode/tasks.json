@@ -1,0 +1,58 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "build bench_server",
+            "type": "shell",
+            "command": "cmake --build build --target bench_server -j",
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "problemMatcher": ["$gcc"]
+        },
+        {
+            "label": "build all",
+            "type": "shell",
+            "command": "cmake --build build -j",
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "group": "build",
+            "problemMatcher": ["$gcc"]
+        },
+        {
+            "label": "test: epoll 全流程",
+            "type": "shell",
+            "command": "./test/test_04_epoll.sh",
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "group": "test",
+            "problemMatcher": []
+        },
+        {
+            "label": "test: 阶段1 客户端(smoke 1连接)",
+            "type": "shell",
+            "command": "python3 test/bench_client.py --port=6401 --mode=smoke --conns=1 --msgs=1",
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "group": "test",
+            "problemMatcher": []
+        },
+        {
+            "label": "test: 阶段3 客户端(50连接压fd回收)",
+            "type": "shell",
+            "command": "python3 test/bench_client.py --port=6402 --mode=smoke --conns=50 --msgs=3",
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "group": "test",
+            "problemMatcher": []
+        }
+    ]
+}

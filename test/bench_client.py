@@ -26,6 +26,7 @@
   ./bench_client.py --port=6201 --mode=throughput --conns=20 --msgs=500
   ./bench_client.py --port=6201 --mode=hold --conns=200 --hold=5
   ./bench_client.py --port=6201 --json      # 机器可读，方便脚本比对
+  python3 test/bench_client.py --port=6401 --mode=smoke --conns=1 --msgs=1
 
 退出码
   0 = 全部正确     1 = 有 mismatch/error     2 = 参数或环境问题
@@ -154,7 +155,7 @@ async def mode_smoke(args, st: Stats):
         if w is None:
             return
         try:
-            for seq in range(3):
+            for seq in range(args.msgs):
                 payload = make_payload(cid, seq, args.size)
                 w.write(payload)
                 await w.drain()

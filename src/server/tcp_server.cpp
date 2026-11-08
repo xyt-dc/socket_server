@@ -41,7 +41,7 @@ void TcpServerBase::do_bind(){
 }
 
 void TcpServerBase::do_listen(){
-    int listen_res = listen(_listen_fd, 5);
+    int listen_res = listen(_listen_fd, 128);
     if (listen_res < 0)
         std::cout<<"listen_failed"<<std::endl; 
 }

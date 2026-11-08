@@ -1,0 +1,62 @@
+# ---------------------------------------------------------------------------
+# gdb 调试脚本：定位 EpollServer 的 accept 阻塞问题
+#
+# 用法（在仓库根目录执行）：
+#   gdb -q -batch -x test/gdb_epoll_accept.cmds ./build/bench_server
+#
+# 注意：run 之后服务端会阻塞在 epoll_wait 等连接，
+#      所以必须另开一个终端/后台进程去连它，否则断点永远不会命中。
+#      test_04_epoll.sh 已经示范了这种「后台起客户端」的写法。
+#
+# 【重要】不要调用成员函数（get_fd()/size() 之类），
+#   Debug 构建下 inline 函数常被内联，gdb 会报
+#   "Cannot evaluate function -- may be inlined"。
+#   直接读成员变量即可（private 在 gdb 里也能读）。
+# ---------------------------------------------------------------------------
+
+set pagination off
+set confirm off
+
+# 1) 断在 handle_accept 的第一行（进入排空循环之前）
+break Epoll_server.hpp:69
+
+# 2) 断在 handle_read 的 recv 之后，用来观察返回值
+break Epoll_server.hpp:100
+
+# 3) 跑起来，命令行参数直接写在这里
+run --server=epoll --port=6421
+
+# ---------------- 命中 handle_accept ----------------
+printf "\n========== 命中 handle_accept ==========\n"
+
+# handle_accept 没有参数，要看状态得从 this 出发
+# ★ 直接读成员变量，不要调用 get_fd() —— inline 函数 gdb 调不动
+print this->_listen_fd
+print this->_running
+print this->_epfd
+
+# ★ 关键检查：listen fd 是不是阻塞的
+#   fcntl(fd, F_GETFL) 返回的 flags 里如果 & O_NONBLOCK == 0，就是阻塞
+#   O_NONBLOCK = 0x800 = 2048
+print /x (int)fcntl(this->_listen_fd, 3, 0)
+printf "O_NONBLOCK 是否置位: %d  (0 = 阻塞 ← 就是这个 bug)\n", \
+       ((int)fcntl(this->_listen_fd, 3, 0) & 0x800) != 0
+
+# 看下一行要执行的源码
+list
+
+# 单步一条，观察 accept4 的返回值
+next
+print cfd
+
+# 继续到第二轮 accept4 —— 这里会永久卡住
+printf "\n========== 继续，第二轮 accept4 会卡住 ==========\n"
+# 用 count 数命中次数：第 2 次命中就是「队列已空却还在 accept」的那一刻
+continue
+
+# 走到这里说明第二轮没卡住（已经修好了），此时 cfd 应该是 -1 且 errno==EAGAIN
+printf "\n========== 第二轮 accept4 返回了，说明 listen fd 已非阻塞 ==========\n"
+print cfd
+print errno
+printf "cfd=%d  errno=%d (EAGAIN=11)  →  cfd==-1 且 errno==11 就是正确行为\n", cfd, errno
+backtrace
