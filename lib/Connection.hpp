@@ -91,6 +91,9 @@ public:
 
     //void save_to_wbuf(){    }
     
+    void clear_wbuf(){
+        _wbuf.clear();
+    }
 
     int fd() const noexcept{return _fd;}
     void shutdown_rdwr() noexcept {
@@ -100,6 +103,7 @@ public:
     }
 private:
     int _fd;
+    size_t _woff;
     std::string _wbuf;
     std::string _rbuf;
 };

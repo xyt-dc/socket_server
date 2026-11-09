@@ -33,6 +33,9 @@ public:
     }
 
     void send_wbuf (int __fd,const void* __data,size_t __n)override{
+
+        //缓冲区有空位 → 塞进去 → 成功；缓冲区满了 → EAGAIN → 剩下的塞不进 → 转到 wbuf 排队等。
+
         std::shared_ptr<Connection> conn_ptr;
         {
             std::lock_guard<std::mutex> lk(_mtx);
@@ -48,46 +51,7 @@ public:
         //   （比如对端先 close，业务回调里还在发），此时直接丢弃。
         if (!conn_ptr) return;
 
-        //1.如果wbuf里有上一次没发送完的数据，这次的数据排队到末尾
-        if(!conn_ptr->wbuf_empty()){
-            conn_ptr->append_wbuf(static_cast<const char*>(__data),__n);
-            return;
-        }
-
-        //2.如果wbuf为空，尝试直接调用send发送
-        size_t remaining = __n;
-        ssize_t nwritten = 0;
-        bool error = false;
-
-        while(remaining > 0){
-            nwritten = ::send(__fd, static_cast<const char*>(__data) + (__n - remaining), remaining, MSG_NOSIGNAL);
-            if (nwritten > 0) {
-                remaining -= static_cast<size_t>(nwritten);
-            } else if (nwritten == 0) {
-                // ★ send 返回 0 在 TCP 上意味着无法推进，继续循环就是死转
-                //   （remaining 不变）。当成错误处理。
-                error = true;
-                break;
-            } else {
-                if (errno == EINTR) continue; // 信号打断，重试
-                if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                    break; // 内核缓冲区满了，退出循环，转 wbuf
-                }
-                error = true; // 真正出错（如 EPIPE / ECONNRESET）
-                break;
-            }
-        }
-
-        if(error){
-            del_and_close(__fd);
-            return;
-        }
-
-        // 如果没发完就把剩下的残余数据塞进wbuf，并让epoll监听可写事件
-        if(remaining > 0){
-            conn_ptr->append_wbuf(static_cast<const char*>(__data) + (__n - remaining),remaining);
-            _epoll->mod(__fd,EPOLLIN|EPOLLOUT);
-        }
+        flush(conn_ptr,__data,__n);
     }
     
 protected:
@@ -136,6 +100,66 @@ protected:
     }
 
 private:
+
+    //flush :新数据、纯冲刷、EAGAIN 落 wbuf、发完摘 EPOLLOUT。
+    void flush(std::shared_ptr<Connection> conn_ptr,const void* __data,size_t __n){
+
+        //1.如果wbuf里有上一次没发送完的数据，这次的数据排队到末尾
+        /**
+         * 状态：wbuf 空 + 未注册 EPOLLOUT      ← 空闲态
+                │ send() 全部塞进内核成功
+                ▼
+        内核缓冲区满 → 剩余存 wbuf + 注册 EPOLLOUT
+                ▼
+        对端 read → TCP 窗口滑动 → 内核缓冲区腾出空间
+                ▼
+        EPOLLOUT 触发 → flush：把 wbuf 全部 write() 出去
+                ▼
+        wbuf 空了 → 注销 EPOLLOUT           ← 回到空闲态
+         * 
+         * 
+         */
+        if(!conn_ptr->wbuf_empty()){
+            conn_ptr->append_wbuf(static_cast<const char*>(__data),__n);
+            return;
+        }
+
+        //2.如果wbuf为空，尝试直接调用send发送
+        size_t remaining = __n;
+        ssize_t nwritten = 0;
+        bool error = false;
+
+        while(remaining > 0){
+            nwritten = ::send(conn_ptr->fd(), static_cast<const char*>(__data) + (__n - remaining), remaining, MSG_NOSIGNAL);
+            if (nwritten > 0) {
+                remaining -= static_cast<size_t>(nwritten);
+            } else if (nwritten == 0) {
+                // ★ send 返回 0 在 TCP 上意味着无法推进，继续循环就是死转
+                //   （remaining 不变）。当成错误处理。
+                error = true;
+                break;
+            } else {
+                if (errno == EINTR) continue; // 信号打断，重试
+                if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                    break; // 内核缓冲区满了，退出循环，转 wbuf
+                }
+                error = true; // 真正出错（如 EPIPE / ECONNRESET）
+                break;
+            }
+        }
+
+        if(error){
+            del_and_close(conn_ptr->fd());
+            return;
+        }
+
+        // 如果没发完就把剩下的残余数据塞进wbuf，并让epoll监听可写事件
+        if(remaining > 0){
+            conn_ptr->append_wbuf(static_cast<const char*>(__data) + (__n - remaining),remaining);
+            _epoll->mod(conn_ptr->fd());
+        }
+    }
+
     bool epoll_init(){
         event_poll.reserve(kMaxEvents);
 
@@ -180,6 +204,10 @@ private:
             int n = ::recv(fd,buf,sizeof(buf),0);
             if (n > 0) {
                 if (_msg_cb) _msg_cb(fd, buf, static_cast<size_t>(n));
+                {
+                    std::lock_guard<std::mutex> lk(_mtx);
+                    if (_conns.find(fd) == _conns.end()) return;   // 回调里把我关了，别再 recv
+                }
                 continue;
             }else if(n == 0){
                 del_and_close(fd);
@@ -195,7 +223,35 @@ private:
         }
     }
     void handle_write(int fd){
-        //?
+        std::shared_ptr<Connection> conn_ptr;
+        {
+            std::lock_guard<std::mutex> lk(_mtx);
+            auto it = _conns.find(fd);
+            if(it==_conns.end()) return;
+            conn_ptr = it->second;
+        }
+        while (!conn_ptr->wbuf_empty())
+        {
+            ssize_t n = ::send(fd, static_cast<const char*>(conn_ptr->wbuf_data()),conn_ptr->wbuf_size(), MSG_NOSIGNAL);
+            if(n>0){
+                conn_ptr->wbuf_retrieve(n);
+                continue;
+            }else{
+                if(errno == EAGAIN){
+                    _epoll->mod(fd);
+                    return;
+                }else{
+                    del_and_close(fd);
+                    return;
+                }
+            }
+            
+        }
+        if(conn_ptr -> wbuf_empty()){
+            _epoll->mod(fd,EPOLLIN);//这里是摘掉EPOLLOUT的操作，直接置为EPOLLIN
+            return;
+        }
+        
     } 
 
     void del_and_close(int fd){
