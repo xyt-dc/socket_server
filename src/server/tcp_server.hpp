@@ -41,6 +41,20 @@ public:
     void set_message_callback(MessageCallback cb){
         _msg_cb = std::move(cb);
     }
+
+    /**
+     * @brief 发送门面（供业务回调 / 外部调用）
+     *
+     * 为什么需要它：派生类的 send_wbuf 语义差异很大（线程模型是阻塞 send，
+     * epoll 模型是「直发 + EAGAIN 进 wbuf 等 EPOLLOUT」），但调用方只持有
+     * TcpServerBase*。而 send_wbuf 在基类里是 protected，静态类型检查会拦住
+     * 外部调用，所以这里开一个 public 门面转调虚函数。
+     */
+    void send(int fd, const char* data, size_t len){
+        if (fd >= 0 && data != nullptr && len > 0){
+            send_wbuf(fd, data, len);
+        }
+    }
 protected:
 
     /**
@@ -48,6 +62,8 @@ protected:
     1.在基类中抽象出一个方法，且该基类只能被继承，不能被实例化    
     2.这个方法必须被派生类实现
     满足这两个条件我们将其定义为纯虚函数
+    写法：virtual void func() = 0;
+    普通虚函数必须提供默认实现，然后子类再override重写
     */ 
 
     enum class AcceptStatus{
@@ -65,6 +81,7 @@ protected:
     };
 
     virtual void run_loop() = 0;//三种方法的核心差异
+
     
     //公共工具
     void create_socket();
@@ -72,6 +89,24 @@ protected:
     void do_bind();
     void do_listen();
     int accept_once(struct sockaddr_in& server_addr);
+    //send with buf
+    virtual void send_wbuf (int __fd,const void* __data,size_t __n){
+        size_t sented = 0;
+        //size_t __n = 1024;
+        //char buf[__n];
+        while (sented < __n){
+            ssize_t n = ::send(__fd,static_cast<const char*>(__data) + sented,__n - sented,MSG_NOSIGNAL);
+            if(n <= 0){
+                if (n < 0 && errno == EINTR)
+                {
+                    continue;
+                }else{
+                    return;
+                }
+            }
+            sented += static_cast<size_t>(n);
+        }
+    }
 
     //client 处理
     void handle_client_read(int client_fd);

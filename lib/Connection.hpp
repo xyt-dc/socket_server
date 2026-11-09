@@ -37,10 +37,60 @@ public:
     // 阶段 3 实现，现在留空。
     // std::vector<uint8_t> rbuf;
 
+
     // 写缓冲区：send 遇 EAGAIN 时数据存这里，等 EPOLLOUT 再冲刷。
     // ★ 这是 TLS 的硬前置条件，不能跳过。
     // 阶段 2 后半段实现。
     // std::vector<uint8_t> wbuf;
+
+    /**
+     * @brief 向发送缓冲区追加数据
+     * @param const char* data 
+     * @param size_t len
+     */
+    void append_wbuf(const char* data,size_t len){
+        if(data && len>0){
+            _wbuf.append(data,len);
+        }
+    }
+
+    /**
+     * @brief 判断缓冲区是否为空
+     */
+    bool wbuf_empty()const{
+        return _wbuf.empty();
+    }
+
+    /**
+     * @brief 获取发送缓冲区中数据的首地址
+     */
+    const char* wbuf_data() const{
+        //return &_wbuf[0];如果是空串的话直接UB
+        return _wbuf.data();
+    }
+
+    /**
+     * @brief 获取发送缓冲区中未发送数据的长度
+     */
+    size_t wbuf_size() const{
+        return _wbuf.size();
+    }
+
+     /**
+     * @brief 核心更新函数：当成功发送了 len 字节后，回收/移除 wbuf 前部的已发数据
+     * @param len 成功写入内核的字节数
+     */
+    void wbuf_retrieve(size_t len){
+        if (len >= _wbuf.size()) {
+            //len 大于当前size 全发完了，清空缓冲区
+            _wbuf.clear();
+        }else{
+            _wbuf.erase(0,len);
+        }
+    }
+
+    //void save_to_wbuf(){    }
+    
 
     int fd() const noexcept{return _fd;}
     void shutdown_rdwr() noexcept {
@@ -50,4 +100,6 @@ public:
     }
 private:
     int _fd;
+    std::string _wbuf;
+    std::string _rbuf;
 };

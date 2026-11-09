@@ -105,17 +105,16 @@ int main(int argc, char** argv) {
     }
 
     // ---------- echo 回调 ----------
-    server->set_message_callback([verbose](int fd, const char* data, size_t len) {
-        size_t sent = 0;
-        while (sent < len) {
-            // MSG_NOSIGNAL：对端已关闭时返回 EPIPE，不触发 SIGPIPE
-            ssize_t n = send(fd, data + sent, len - sent, MSG_NOSIGNAL);
-            if (n <= 0) {
-                if (n < 0) perror("send");
-                return;
-            }
-            sent += static_cast<size_t>(n);
-        }
+    // 回调里绝对不要直接调 ::send：
+    //   1) 线程模型下会阻塞当前工作线程；
+    //   2) epoll 模型下会绕过 wbuf，慢客户端把 reactor 拖死，
+    //      send_wbuf 里的 EAGAIN/EPOLLOUT 分支永远执行不到。
+    // 统一走 TcpServerBase::send() 门面，由派生类自己决定「直发还是排队」。
+    // 注意不能写 server.get()->send_wbuf(...)：静态类型是 TcpServerBase*，
+    // 而 send_wbuf 在那里还是 protected，编译不过。
+    TcpServerBase* srv = server.get();
+    server->set_message_callback([verbose, srv](int fd, const char* data, size_t len) {
+        srv->send(fd, data, len);   // 重试 / 缓冲 / 关闭全在 send_wbuf 内
         if (verbose) {
             std::cout << "[echo] fd=" << fd << " " << len << " bytes" << std::endl;
         }

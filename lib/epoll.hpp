@@ -60,7 +60,7 @@ public:
         return ctl(EPOLL_CTL_ADD,fd,events);
     }
 
-    bool mod(int fd,uint32_t events = EPOLLIN||EPOLLOUT){
+    bool mod(int fd,uint32_t events = EPOLLIN|EPOLLOUT){
         //修改监听事件
         return ctl(EPOLL_CTL_MOD,fd,events);
     }

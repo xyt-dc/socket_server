@@ -32,8 +32,66 @@ public:
         }
     }
 
+    void send_wbuf (int __fd,const void* __data,size_t __n)override{
+        std::shared_ptr<Connection> conn_ptr;
+        {
+            std::lock_guard<std::mutex> lk(_mtx);
+
+            auto it = _conns.find(__fd);
+            if (it != _conns.end())
+            {
+                conn_ptr = it->second;
+            }
+        }
+
+        // ★ 连接可能已经被 handle_read 里的 del_and_close 摘掉了
+        //   （比如对端先 close，业务回调里还在发），此时直接丢弃。
+        if (!conn_ptr) return;
+
+        //1.如果wbuf里有上一次没发送完的数据，这次的数据排队到末尾
+        if(!conn_ptr->wbuf_empty()){
+            conn_ptr->append_wbuf(static_cast<const char*>(__data),__n);
+            return;
+        }
+
+        //2.如果wbuf为空，尝试直接调用send发送
+        size_t remaining = __n;
+        ssize_t nwritten = 0;
+        bool error = false;
+
+        while(remaining > 0){
+            nwritten = ::send(__fd, static_cast<const char*>(__data) + (__n - remaining), remaining, MSG_NOSIGNAL);
+            if (nwritten > 0) {
+                remaining -= static_cast<size_t>(nwritten);
+            } else if (nwritten == 0) {
+                // ★ send 返回 0 在 TCP 上意味着无法推进，继续循环就是死转
+                //   （remaining 不变）。当成错误处理。
+                error = true;
+                break;
+            } else {
+                if (errno == EINTR) continue; // 信号打断，重试
+                if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                    break; // 内核缓冲区满了，退出循环，转 wbuf
+                }
+                error = true; // 真正出错（如 EPIPE / ECONNRESET）
+                break;
+            }
+        }
+
+        if(error){
+            del_and_close(__fd);
+            return;
+        }
+
+        // 如果没发完就把剩下的残余数据塞进wbuf，并让epoll监听可写事件
+        if(remaining > 0){
+            conn_ptr->append_wbuf(static_cast<const char*>(__data) + (__n - remaining),remaining);
+            _epoll->mod(__fd,EPOLLIN|EPOLLOUT);
+        }
+    }
     
 protected:
+
     void run_loop() override{
         if(!epoll_init()){
             std::cerr<<"epoll_init failed"<<std::endl;
@@ -46,13 +104,32 @@ protected:
             if (n<0)break;
             for(int i = 0; i < n;++i){
                 int fd = event_poll[i].data.fd;
+                const uint32_t ev = event_poll[i].events;
+
                 if (fd == _listen_fd) {
                     handle_accept();
-                } else if (event_poll[i].events & EPOLLIN) {      // ★ 先看可读
-                    handle_read(fd);
-                } else if (event_poll[i].events & (EPOLLERR | EPOLLHUP)) {
-                    del_and_close(fd);
+                    continue;
                 }
+
+                // ★ EPOLLERR/EPOLLHUP 优先：连接已死就没必要读写，
+                //   且它常与 EPOLLIN 同时置位，放在 else-if 链末尾会被吞掉
+                if (ev & EPOLLERR) {
+                    del_and_close(fd);
+                    continue;
+                }
+
+                // EPOLLHUP：对端 close。但内核里可能还残留未读完的数据，
+                // 先读一次把数据榨干，读到 0 时 handle_read 内部会关闭。
+                if (ev & EPOLLHUP) {
+                    if (ev & EPOLLIN) handle_read(fd);
+                    else              del_and_close(fd);
+                    continue;
+                }
+
+                // ★ EPOLLIN / EPOLLOUT 用两个独立 if，不互斥：
+                //   同一个 fd 完全可能同时可读可写
+                if (ev & EPOLLIN)  handle_read(fd);
+                if (ev & EPOLLOUT) handle_write(fd);
             }
             //while (_pool.try_run_one())
         }
@@ -98,10 +175,12 @@ private:
     void handle_read(int fd){
         
         char buf[KReadBuf];
+        //send_wbuf(fd,buf,KReadBuf);
         while(true){
             int n = ::recv(fd,buf,sizeof(buf),0);
             if (n > 0) {
                 if (_msg_cb) _msg_cb(fd, buf, static_cast<size_t>(n));
+                continue;
             }else if(n == 0){
                 del_and_close(fd);
                 return;
