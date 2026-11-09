@@ -3,8 +3,8 @@
 一个从零手写的 C++17 TCP 服务端，目标是**沿着真实工业路径，一步步把这套东西做到产品级**。
 
 不是抄一个 muduo 就完事——每一层的坑都自己踩一遍，踩完写笔记（`note/`），
-再用脚本量化验证（`test/`）。当前处于**并发模型演进**阶段：三种模型已跑通并有实测证据，
-第四个（epoll / reactor）正在实现。
+再用脚本量化验证（`test/`）。当前处于**并发模型演进**阶段：四种模型已全部跑通，
+第四种（epoll / reactor）的**读写路径已闭合**，正在做背压与四模型量化对比。
 
 ---
 
@@ -24,7 +24,7 @@
 
 ## 一、当前进度总览
 
-**代码量：约 1700 行**（`lib/` 878 + `src/` 815，不含笔记与测试脚本 +1778 行）。
+**代码量：约 1930 行**（`lib/` 934 + `src/` 993，不含笔记与测试脚本 +2448 行）。
 
 ### 已实现 ✅
 
@@ -41,15 +41,16 @@
 | **epoll 封装** | `Epoll`：`epoll_create1` / `ctl`（`add`/`mod`/`del`）/ `wait` 三个原语，RAII + 移动语义 + 事件缓冲复用 |
 | **并发模型 ①** | `ThreadPerConnServer`：一连接一线程（`detach`），用作对比基线 |
 | **并发模型 ②** | `ThreadPool_server`：有界队列 + 背压（队列满 → 拒绝连接）+ 优雅关闭 |
-| **并发模型 ③** | `EpollServer`：**进行中** —— `epoll_init` / `handle_accept` / `handle_read` / `del_and_close` 已实现，`handle_write` 待补 |
-| **压测脚手架** | `bench_server`（`--server=thread\|pool\|Epoll` 运行时切换）+ `bench_client.py`（asyncio，失败分类） |
+| **并发模型 ③** | `EpollServer`：**写路径已打通** —— `epoll_init` / `handle_accept` / `handle_read` / `handle_write` / `del_and_close` 全部实现，含 wbuf + `EPOLLOUT` 半写处理 |
+| **写路径（wbuf）** | `send` 遇 `EAGAIN` → 残余落 `wbuf` + 注册 `EPOLLOUT`；可写事件触发 `handle_write` → `send` + `wbuf_retrieve` 推进；排空后 `mod(fd, EPOLLIN)` 摘掉 `EPOLLOUT` |
+| **压测脚手架** | `bench_server`（`--server=thread\|pool\|epoll` 运行时切换）+ `bench_client.py`（asyncio，失败分类） |
 | **优雅关闭链路** | `SIGINT → stop() → accept 返回 EBADF → Stopped → cleanup_clients() → worker join` |
-| **量化测试** | EMFILE 治理（CPU 100%→0%）、队列语义（**56 断言**）、线程池加速比（2.75x）、**线程池饿死复现** |
+| **量化测试** | EMFILE 治理（CPU 100%→0%）、队列语义（**56 断言**）、线程池加速比（2.75x）、**线程池饿死复现**、**大包收发平衡校验** |
 
 ### 未实现 ❌
 
-输出缓冲区（`EAGAIN` 挂起）、业务协议（粘包/拆包）、定时器、日志系统、
-主从 reactor、性能压测（QPS/P99）……
+业务协议（粘包/拆包）、定时器、日志系统、主从 reactor、
+写缓冲上限（backpressure）、性能压测（QPS/P99）……
 
 完整差距分析见[第八节](#八距离产品级还有多远)。
 
@@ -93,6 +94,8 @@ classDiagram
         -epoll_init()
         -handle_accept()
         -handle_read(fd)
+        -handle_write(fd)
+        -flush(conn_ptr, data, n)
         -del_and_close(fd)
     }
 
@@ -105,7 +108,11 @@ classDiagram
     }
     class Connection {
         -int _fd
+        -string _wbuf
         +fd()
+        +append_wbuf(data, len)
+        +wbuf_retrieve(len)
+        +wbuf_empty()
         +shutdown_rdwr()
     }
 
@@ -178,16 +185,19 @@ socket/
 │   ├── mthread/                    并发模型（每种模型一个文件）
 │   │   ├── pthread_server.hpp        一连接一线程
 │   │   ├── thread_pool_server.hpp    线程池 + 背压
-│   │   └── Epoll_server.hpp          epoll / reactor（进行中）
+│   │   └── Epoll_server.hpp          epoll / reactor（读写路径已闭合）
 │   └── demo/server.cpp             早期 demo（已注释，保留）
 ├── test/
 │   ├── test_01_emfile.sh           fd 耗尽：CPU 占用 + 日志增长
 │   ├── test_02_blocking_queue.sh   队列语义（56 断言，含 TSan）
 │   ├── test_03_pool_starvation.sh  线程池饿死复现（3 个实验）
+│   ├── test_04_epoll.sh            epoll 正确性（6 个阶段）
 │   ├── blocking_queue_test.cpp    队列 + try_run_one 单元测试
 │   ├── thread_pool_test.cpp        线程池加速比
 │   ├── bench_server.cpp            压测专用入口（--server= 运行时切换）
-│   └── bench_client.py             asyncio 压测客户端（失败分类）
+│   ├── bench_client.py             asyncio 压测客户端（失败分类）
+│   ├── manual_check_wbuf.py        强制 EAGAIN，验证 wbuf 不重复发送
+│   └── bigfile_echo.py             大文件字节级回环校验
 └── note/                         踩坑笔记（按阶段）
     ├── note_stage1_TCP服务端踩坑.md
     ├── note_stage2_accept错误处理与fd耗尽.md
@@ -222,7 +232,7 @@ cmake --build build -j
 ```bash
 ./build/bench_server --server=thread --port=6201
 ./build/bench_server --server=pool   --port=6201 --workers=4 --queue-cap=1024
-./build/bench_server --server=Epoll  --port=6201          # 注意首字母大写
+./build/bench_server --server=epoll  --port=6201          # 三个模型名都是全小写
 ./build/bench_server --help
 ```
 
@@ -253,7 +263,7 @@ python3 test/bench_client.py --port=6201 --mode=echo --conns=100 --msgs=10
 | **串行** | 待补（`BaseEchoServer`） | 1 | 零开销、零竞争 | 一个客户端能饿死所有人 |
 | **一连接一线程** | `pthread_server.hpp` | ∞（无上限） | 实现最简单 | 1 万连接 ≈ 80GB 虚拟栈；`detach + this` = UAF；无法优雅关闭 |
 | **线程池** | `thread_pool_server.hpp` | 硬上限（worker 数） | 有背压、可优雅关闭 | **阻塞 `recv` 焊死 worker**，长连接下退化成"一连接一线程 + 上限 N" |
-| **epoll / reactor** | `Epoll_server.hpp`（进行中） | 万级连接 | 单线程管万连接，无线程开销 | 需要非阻塞 I/O + 状态机，复杂度陡增 |
+| **epoll / reactor** | `Epoll_server.hpp` | 万级连接 | 单线程管万连接，无线程开销 | 需要非阻塞 I/O + 状态机，复杂度陡增 |
 
 ### 三个缺陷的实测证据
 
@@ -305,19 +315,72 @@ ThreadPool_server server(port);             // ← 换类型
 
 **方式 B**：CMake 多个 `add_executable` + 编译期宏
 
-**方式 C（已实现）**：运行时 `--server=thread|pool|Epoll`（`std::unique_ptr<TcpServerBase>` 分派）
+**方式 C（已实现）**：运行时 `--server=thread|pool|epoll`（`std::unique_ptr<TcpServerBase>` 分派）
 
 ```bash
 ./build/bench_server --server=thread --port=6201
 ./build/bench_server --server=pool   --port=6201 --workers=4
-./build/bench_server --server=Epoll  --port=6201
+./build/bench_server --server=epoll  --port=6201
 ```
 
 > **注意**：`TcpServerBase` 有纯虚 `run_loop()`，**不能直接实例化**。
 > 想跑串行基线必须写一个最小派生类。另外 `g_server` 必须声明成 `TcpServerBase*`，
 > 否则切换模型时会编译失败。
 >
-> 模型名**大小写敏感**：`--server=Epoll` 可以，`--server=epoll` 会返回 exit 2。
+> 模型名为**全小写**：`thread` / `pool` / `epoll`。传错会返回 exit 2。
+> 不带参数时默认 `--server=thread`。
+
+### epoll 模型的写路径：`wbuf` + `EPOLLOUT`
+
+这是整个 epoll 模型**最难写、最容易漏**的部分。非阻塞 `send` 随时可能只写一半，
+剩下的必须存起来等可写事件，否则数据静默丢失。
+
+状态机（`flush()` 一处实现，两个调用点驱动）：
+
+```
+空闲：wbuf 空 + 未注册 EPOLLOUT
+   │ send_wbuf() → flush() → send() 全部进内核
+   ▼
+内核缓冲满 → EAGAIN → 残余落 wbuf + mod(fd, EPOLLIN|EPOLLOUT)
+   │
+   ▼  对端 read → TCP 窗口滑动 → 内核腾出空间
+   │
+   ▼  EPOLLOUT 触发 → handle_write() → flush(conn, nullptr, 0)
+   │     循环 send + wbuf_retrieve(n) 推进缓冲区
+   ▼
+wbuf 排空 → mod(fd, EPOLLIN) 摘掉 EPOLLOUT → 回到空闲
+```
+
+两个调用点：
+
+| 调用点 | 入口 | 语义 |
+|---|---|---|
+| 业务要发数据 | `send_wbuf(fd, data, len)` → `flush(conn, data, len)` | 先还旧欠账，再发新数据 |
+| 可写事件到了 | `handle_write(fd)` → `flush(conn, nullptr, 0)` | 纯冲刷，`len==0` 时新数据段自动跳过 |
+
+**四条不能错的红线**：
+
+1. **`EPOLLOUT` 属于 LT 模式**，只要注册着就会一直返回。发完不忘 
+   `mod(fd, EPOLLIN)` 摘掉 → `while(running)` 变成 100% CPU 忙等。
+2. **必须先还旧欠账再发新数据**。`wbuf` 里是上次的残留，TCP 是字节流，
+   新数据插到旧数据前面就是乱序。
+3. **`send` 返回 0 在 TCP 上不能继续循环**。长度不推进 → 死循环，当错误处理。
+4. **`EPOLLIN` 和 `EPOLLOUT` 用两个独立 `if`**，同一 fd 完全可能同时可读可写。
+
+实测（Linux loopback，4 核）：
+
+| 指标 | `handle_write` 空壳 | 修复后 |
+|---|---|---|
+| 20连接×2000条×4096B 消息数 | `recv=13302 / sent=40000` | **`recv=sent=40000`** |
+| `mismatch` | 20 | **0** |
+| 吞吐 | 425 msg/s | **17618 msg/s** |
+| CPU | 100%（LT 忙等） | **19.6%** |
+| P50 延迟 | 30,796 ms | **1,584 ms** |
+| 8 MB 大包放大倍数 | 0.24x（丢 76%） | **1.00x** |
+
+> 阶段 [6]（64 B 小包）**无法触发 `EAGAIN`**，因为默认 `tcp_wmem` 就有 16 KB，
+> 500 条消息总共 32 KB 也可能一次性全部塞进内核。所以它永远是绿的，
+> 这是**假绿**。真正的验证必须用 `manual_check_wbuf.py` 强制造出 `EAGAIN`。
 
 ### 线程池模型的核心认知
 
@@ -389,6 +452,70 @@ ThreadPool_server server(port);             // ← 换类型
 三个实验（A 饿死 / B 队满 / C 线程数），判据只看**行为**不看日志文案。
 完整数据见[第五节](#五并发模型)。这是"为什么必须转 reactor"的实测证据。
 
+### `test_04_epoll.sh` —— epoll 正确性与核心价值
+
+```bash
+./test/test_04_epoll.sh              # 默认：阶段 1 失败就中止
+./test/test_04_epoll.sh --all        # 阶段 1 失败也继续跑完
+./test/test_04_epoll.sh --no-build   # 跳过编译
+```
+
+和 `test_03` 的区别：`test_03` 测**缺陷**（PASS = 缺陷被稳定复现），
+`test_04` 测**正确性**（PASS = 行为符合预期）。六个阶段：
+
+| 阶段 | 场景 | 判据 | 抓什么 |
+|---|---|---|---|
+| [1] 功能冒烟 | 1 连接 1 消息 | `recv==sent, mismatch==0` | 基本功 |
+| [2] 并发冒烟 | 50 连接 × 3 消息 | `conn_ok==50, recv==150` | accept 循环 |
+| [3] fd 回收 | 并发跑完 fd 数回落 | `fds_after <= fds_base + 2` | `handle_read` 缺 `n==0` 分支 |
+| [4] 空闲连接 | 500 连接只连不发 | `conn_ok==500` 且服务端存活 | backlog 过小 |
+| [5] 线程解耦 | 20 vs 500 连接的线程数 | 两者必须相等 | **epoll 的核心价值** |
+| [6] 流水吞吐 | 20 连接 × 500 消息 | `partial==0, mismatch==0` | wbuf 半写处理 |
+
+**当前状态：六个阶段全绿。** 阶段 [4] 曾因 `listen(fd, 5)` 只完成 480/502
+而失败，改成 128 后通过；阶段 [6] 的 64 B 小包无法触发 `EAGAIN`，
+是**假绿**，真正的写路径验证靠下面两个脚本。
+
+### `test/manual_check_wbuf.py` —— 强制 `EAGAIN`，验证 wbuf 是否被重复发送
+
+```bash
+./build/bench_server --server=epoll --port=6421 &
+python3 test/manual_check_wbuf.py 6421 8      # 8 MB
+```
+
+手段：客户端 `setsockopt(SO_RCVBUF, 8192)` 把接收窗口压到最小，
+发完后**憋 6 秒不读**，强制服务端发送缓冲区饱和 → `send` 必然撞 `EAGAIN`
+→ 残余进 `wbuf` → 触发 `EPOLLOUT`。
+
+判据是**放大倍数 = 收到字节 / 发送字节**：
+
+| 倍数 | 含义 |
+|---|---|
+| `1.00x` | ✅ 收发平衡，`wbuf` 消费正确 |
+| `> 1.05x` | 🔴 `wbuf` 被重复发送（`wbuf_retrieve` 没调或参数错） |
+| `< 0.95x` | 🔴 数据丢失 |
+
+这个脚本抓出过真实缺陷：修复前 8 MB 只收到 1.98 MB（**丢失 76.4%**），
+20 MB 丢失 **90.6%**。strace 给出的铁证是同一个 `sendto` 请求长度
+`5804032` 连续出现两次（第一次成功写 884736，第二次仍按原长度重发），
+说明 `wbuf` 从未推进。
+
+> ⚠️ 注意：脚本内部的 25 s deadline 在 8 MB 量级会**误报缺失**
+> ——`SO_RCVBUF=8192` 时每轮 `recv` 只有约 14.7 KB，完整收完 8 MB
+> 需要约 112 s。判读以输出末尾的最终累计值（`全部收到`）为准。
+
+### `test/bigfile_echo.py` —— 大文件字节级回环校验
+
+```bash
+python3 test/bigfile_echo.py 6421 64          # 64 MB
+```
+
+服务端正常读 + 客户端正常并发读，用来验证**不阻塞**的大包路径。
+与 `manual_check_wbuf.py` 互补：这个测"正常情况不丢"，那个测"极端情况不重"。
+
+实测：8 MB / 64 MB 均字节级完全一致，64 MB 时服务端 RSS 峰值 83 MB
+（其中 64 MB 就是 `wbuf`），这是**缺少写缓冲上限**的直接证据。
+
 ### `test/thread_pool_test.cpp` —— 加速比
 
 ```bash
@@ -454,17 +581,20 @@ g++ -std=c++17 -O2 -Wall -Wextra -I./lib -pthread \
 
 | 差距 | 现状 | 产品级要求 | 代价 |
 |---|---|---|---|
-| **事件驱动** | 无，阻塞 I/O | epoll + **非阻塞** + 状态机 | 需重写 `run_loop`，约 500 行 |
+| **事件驱动** | epoll 已跑通，单线程管多连接 | 主从 reactor（one loop per thread） | 约 300 行
 | **协议层** | 无（echo 原始字节流） | 长度头 / 分隔符 + 粘包拆包 + 单条消息上限 | 约 300 行 + 状态机 |
-| **写路径处理** | `send` 不考虑部分写 | 输出缓冲区 + `EAGAIN` 挂起 + 可写事件回调 | 约 200 行，**最容易漏** |
+| **写路径处理** | ✅ 已实现：wbuf + `EAGAIN` 挂起 + `EPOLLOUT` 回溯 | 写缓冲上限（backpressure）+ `writev` 聚合写 | 约 50 行 |
 | **连接超时** | 无 | 定时器（时间轮 / 小根堆）+ 空闲断开 | 约 200 行 |
 | **日志系统** | `std::cout` / `std::cerr` | 分级、异步、滚动、可关 | 约 200 行 |
 
-> **`send` 的部分写是当前最大的隐藏炸弹。**
-> 现在的 echo 回调里 `while (sent < len) send(...)`，一旦 socket 发送缓冲区满
-> 且 socket 是非阻塞的，就会 `EAGAIN` → 你的循环会 `return`（当前代码是 `return`）
-> → **这条消息的后半段永久丢失**。
-> 只是因为现在是阻塞 socket 才没暴露。换成非阻塞的瞬间就会炸。
+> **写路径（阶段 5 已闭合）**
+> 曾经的隐藏炸弹：`send` 遇 `EAGAIN` 直接 `return`，消息后半段永久丢失。
+> 现在 `send_wbuf` → `flush()`：能发就直接发，发不完的残余落 `wbuf` 并注册
+> `EPOLLOUT`；可写事件触发 `handle_write` → `send` 成功后用 `wbuf_retrieve(n)`
+> 推进缓冲区；排空后 `mod(fd, EPOLLIN)` 摘掉 `EPOLLOUT`，回到空闲态。
+>
+> 实测：8 MB 大包字节级收发一致，20×2000×4096 四万条消息 `mismatch=0`。
+> **剩下的坑**：`wbuf` 没有上限，对端长期不读时内存会持续增长。
 
 #### 🟠 P1 —— 竞品都有，没有就被比下去
 
@@ -487,7 +617,7 @@ g++ -std=c++17 -O2 -Wall -Wextra -I./lib -pthread \
 | **优雅重启** | `SO_REUSEPORT` + 新旧进程交接，不断连接地升级 |
 | **限流 / 黑名单** | 单 IP 连接数上限、速率限制、慢连接攻击防护 |
 | **崩溃可观测** | core dump、backtrace、`perf` / `gperftools` 火焰图 |
-| **压力测试** | 自研压测客户端（连接数 / QPS / 延迟分布），当前完全没有 |
+| **压力测试** | 已有 `bench_client.py`（smoke/latency/throughput/hold 四模式）+ 两个大包脚本；缺连接数万级的稳定性测试与延迟直方图 |
 | **CI** | 编译矩阵（gcc/clang × O0/O2/TSan/ASan）、回归测试自动化 |
 
 #### ⚪ P3 —— 特定场景才需要
@@ -498,7 +628,7 @@ TLS（OpenSSL）、HTTP/2、IPv6 dual-stack、`io_uring`、DPDK、多进程模�
 
 | 项目 | 代码量 | 说明 |
 |---|---|---|
-| **本项目** | ~1,700 行 | 四种并发模型（其四进行中）+ 队列 + 线程池 + epoll 封装 |
+| **本项目** | ~1,930 行 | 四种并发模型（epoll 写路径已闭合）+ 队列 + 线程池 + epoll 封装 |
 | muduo（陈硕） | ~10,000 行 | 主从 reactor + 定时器 + 日志 + 协议 |
 | libevent | ~30,000 行 | 跨平台事件循环 + bufferevent |
 | nginx（核心网络） | ~150,000 行 | 多进程 + 全异步 + 极致调优 |
@@ -518,23 +648,28 @@ TLS（OpenSSL）、HTTP/2、IPv6 dual-stack、`io_uring`、DPDK、多进程模�
 
 | # | 缺陷 | 触发条件 | 严重度 |
 |---|---|---|---|
-| 1 | `send` 遇 `EAGAIN` 直接 `return`，消息后半段丢失 | 非阻塞 socket + 发送缓冲满 | 🔴 |
-| 2 | `EpollServer::handle_write` 是空壳，`EPOLLOUT` 未注册也没处理 | 需要非阻塞写的那一天 | 🔴 |
+| 1 | ~~`send` 遇 `EAGAIN` 直接 `return`，消息后半段丢失~~ ✅ 已修 | — | ✅ |
+| 2 | ~~`EpollServer::handle_write` 是空壳，`EPOLLOUT` 未处理~~ ✅ 已修 | — | ✅ |
 | 3 | `EpollServer` 里 `_epfd` 成员已废弃但析构仍在 `close(_epfd)`（恒为 -1，无害但误导） | — | ⚪ |
 | 4 | `ThreadPool_server` 无 `Fatal` 连续次数上限，永久错误会无限退避 | listen fd 损坏 | 🟠 |
 | 5 | `_listen_fd` 非原子，`stop()` 与析构可能双重 `close` | 多线程/信号交错 | 🟠 |
 | 6 | 阻塞 `recv` 焊死 worker，线程池退化成"一连接一线程 + 上限" | 长连接 | 🟠 |
-| 7 | `listen(fd, 5)` backlog 过小 | 高并发建连 | 🟡 |
+| 7 | ~~`listen(fd, 5)` backlog 过小~~ ✅ 已改为 128 | — | ✅ |
 | 8 | 全局 `_mtx` 保护连接表，worker 数一多就是瓶颈 | worker > 32 | 🟡 |
 | 9 | `_idle_fd` 预留机制定义了但没启用 | EMFILE | 🟡 |
 | 10 | 无连接数上限、无空闲超时 → slowloris / 连接耗尽 | 公网暴露 | 🟠 |
 | 11 | `test/pooltest`、`test/bq_*` 二进制被提交进仓库 | — | ⚪ |
+| 12 | `wbuf` 无上限，对端长期不读 → 内存无限增长 | 慢客户端 / 恶意不读 | 🟠 |
+| 13 | `Connection::wbuf_retrieve` 用 `erase(0,len)`，每次 memmove，大量小块写是 O(n²) | 大包 + 频繁部分写 | 🟡 |
+| 14 | `flush()` 已抽出但 `send_wbuf` 内仍保留一份重复实现 | — | 🟡 |
+| 15 | `_epoll->mod(fd)` 依赖默认参数 `EPOLLIN\|EPOLLOUT` | 改 `Epoll` 默认值时会静默断开写事件 | 🟠 |
+| 16 | `epoll_init()` 的 `fcntl` 返回值未检查 | — | ⚪ |
 
 ---
 
 ## 九、Roadmap
 
-### 阶段 5：事件驱动（进行中 🚧）
+### 阶段 5：事件驱动（写路径已闭合 ✅）
 
 - [x] `Epoll` 封装：`epoll_create1` + `epoll_ctl` + `epoll_wait`
 - [x] `Connection` RAII：`close()` 只在析构里，`shutdown_rdwr()` 唤醒阻塞 recv
@@ -542,9 +677,12 @@ TLS（OpenSSL）、HTTP/2、IPv6 dual-stack、`io_uring`、DPDK、多进程模�
 - [x] `handle_accept()`：`accept4(SOCK_NONBLOCK)` 循环 + `EAGAIN`/`EMFILE` 分支
 - [x] `handle_read()`：非阻塞 recv 循环，读到 `EAGAIN` 才返回
 - [x] `del_and_close()`：**先 `epoll.del` 再 `erase`**（顺序错了会静默失效）
-- [x] `bench_server --server=Epoll` 运行时切换 + `bench_client.py` 失败分类
-- [ ] `run_loop()` 主循环联调打通（当前 `accept4: Bad file descriptor`）
-- [ ] **写路径**：输出缓冲区 + `EAGAIN` 挂起 + `EPOLLOUT` + `handle_write`
+- [x] `bench_server --server=epoll` 运行时切换 + `bench_client.py` 失败分类
+- [x] `run_loop()` 主循环联调打通
+- [x] **写路径**：wbuf + `EAGAIN` 挂起 + `EPOLLOUT` 注册/摘除 + `handle_write` 消费
+- [x] `handle_read` 在业务回调后复查 `_conns`（回调里关了连接就不再 recv）
+- [ ] 写缓冲上限：`wbuf_size() > 1MB` → 断连（backpressure）
+- [ ] `wbuf_retrieve` 改用 `_woff` 偏移，避开 `erase(0,len)` 的 memmove
 - [ ] `IoThreadPool::try_run_one()` 接回 reactor 空闲间隙
 - [ ] `BaseEchoServer` —— 串行基线，补齐对比模型
 - [ ] 对比四种模型的 QPS / P99 延迟
