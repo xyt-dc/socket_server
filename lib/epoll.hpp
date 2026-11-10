@@ -60,13 +60,13 @@ public:
         return ctl(EPOLL_CTL_ADD,fd,events);
     }
 
-    bool mod(int fd,uint32_t events = EPOLLIN|EPOLLOUT){
+    bool mod(int fd,uint32_t events){
         //修改监听事件
         return ctl(EPOLL_CTL_MOD,fd,events);
     }
 
     bool del(int fd){
-        //删除监听事件
+        //删除监听事件，⚠️这里只是将不活跃的fd从活跃列表里删除
         return ctl(EPOLL_CTL_DEL,fd,0);
     }
 
@@ -106,8 +106,7 @@ public:
 
         for(;;){
             //vector::data() 返回数组首元素指针
-            const int ready_count =
-                ::epoll_wait(_epoll_fd,active_events.data(),maxev,timeout_ms);
+            const int ready_count =::epoll_wait(_epoll_fd,active_events.data(),maxev,timeout_ms);
             if(ready_count < 0){
                 if(errno == EINTR){
                     continue;//信号打断重试

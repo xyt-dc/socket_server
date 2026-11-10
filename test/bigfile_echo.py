@@ -7,7 +7,7 @@
 
 用法:
     ./build/bench_server --server=epoll --port=6200 &
-    python3 test/bigfile_echo.py 6200 /tmp/big_in.bin [--rcvbuf=8192] [--noread=0]
+    python3 test/bigfile_echo.py 6200 --file=/tmp/big_in.bin --rcvbuf=4096 --noread=10 --timeout=150
 
     --rcvbuf   客户端接收缓冲区（小 => 更快逼出服务端 send 的 EAGAIN）
     --noread   发完之后先不读，静默 N 秒，逼迫服务端 send buffer 塞满

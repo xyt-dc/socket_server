@@ -26,11 +26,13 @@ public:
     static constexpr size_t KReadBuf = 4096;
     
     EpollServer(int port):TcpServerBase(port){}
-    ~EpollServer(){
-        if (_epoll.get()->get_fd() >= 0){
-            ::close(_epoll.get()->get_fd());
-        }
-    }
+    ~EpollServer() = default;
+    // {
+    //     //目前我们做的事情是析构服务器Epoll，但是Epoll是RAII的所以不用再释放一次，这里注释掉，让epoll自己析构就行
+    //     // if (_epoll.get()->get_fd() >= 0){
+    //     //     ::close(_epoll.get()->get_fd());
+    //     // }
+    // }
 
     void send_wbuf (int __fd,const void* __data,size_t __n)override{
 
@@ -64,9 +66,9 @@ protected:
         _epoll.get()->set_max_events(kMaxEvents);
         while(_running){
             //查看有多少活跃事件并返回
-            int n = _epoll.get()->wait(event_poll,kWaitTimeOut);
+            ssize_t n = _epoll.get()->wait(event_poll,kWaitTimeOut);
             if (n<0)break;
-            for(int i = 0; i < n;++i){
+            for(size_t i = 0; i < n;++i){
                 int fd = event_poll[i].data.fd;
                 const uint32_t ev = event_poll[i].events;
 
@@ -156,7 +158,7 @@ private:
         // 如果没发完就把剩下的残余数据塞进wbuf，并让epoll监听可写事件
         if(remaining > 0){
             conn_ptr->append_wbuf(static_cast<const char*>(__data) + (__n - remaining),remaining);
-            _epoll->mod(conn_ptr->fd());
+            _epoll->mod(conn_ptr->fd(),EPOLLIN|EPOLLOUT);
         }
     }
 
@@ -165,10 +167,18 @@ private:
 
         //设置listen_fd为非阻塞模式
         int flags = fcntl(_listen_fd,F_GETFL);
-        fcntl(_listen_fd,F_SETFL,flags|O_NONBLOCK);
+        if(flags == -1){
+            std::cerr<<"fcntl F_GETFL failed: "<<strerror(errno)<<std::endl;
+            return false;
+        }
+
+        if(fcntl(_listen_fd,F_SETFL,flags|O_NONBLOCK) == -1){
+            std::cerr<<"fcntl F_SETFL failed: "<<strerror(errno)<<std::endl;
+            return false;
+        }
 
         //初始化一个epoll实例
-        _epoll = std::make_unique<Epoll>(EPOLL_CLOEXEC,64);
+        _epoll = std::make_unique<Epoll>(EPOLL_CLOEXEC,kMaxEvents);
         return  _epoll.get()->add(_listen_fd);
     }
     
@@ -201,9 +211,10 @@ private:
         char buf[KReadBuf];
         //send_wbuf(fd,buf,KReadBuf);
         while(true){
-            int n = ::recv(fd,buf,sizeof(buf),0);
+            ssize_t n = ::recv(fd,buf,sizeof(buf),0);
             if (n > 0) {
-                if (_msg_cb) _msg_cb(fd, buf, static_cast<size_t>(n));
+                if (_msg_cb) 
+                    _msg_cb(fd, buf, static_cast<size_t>(n));
                 {
                     std::lock_guard<std::mutex> lk(_mtx);
                     if (_conns.find(fd) == _conns.end()) return;   // 回调里把我关了，别再 recv
@@ -234,11 +245,13 @@ private:
         {
             ssize_t n = ::send(fd, static_cast<const char*>(conn_ptr->wbuf_data()),conn_ptr->wbuf_size(), MSG_NOSIGNAL);
             if(n>0){
-                conn_ptr->wbuf_retrieve(n);
+                conn_ptr->wbuf_retrieve(static_cast<size_t>(n));
                 continue;
             }else{
                 if(errno == EAGAIN){
-                    _epoll->mod(fd);
+                    //发送缓冲区满了剩余数据存 wbuf，注册 EPOLLOUT 等通知
+                    //EPOLLOUT 驱赶 wbuf，EPOLLIN 保证还能收到新数据
+                    _epoll->mod(fd,EPOLLOUT|EPOLLIN);
                     return;
                 }else{
                     del_and_close(fd);

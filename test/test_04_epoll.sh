@@ -9,7 +9,7 @@
 #   test_04 测的是「正确性」，PASS = 行为符合预期。
 #   所以这个脚本第一次跑大概率是 FAIL 的 —— 它就是你的待办清单。
 #
-# 六个阶段（按依赖顺序，前者失败后者无意义）
+# 七个阶段（按依赖顺序，前者失败后者无意义）
 #   [1] 功能冒烟    1 连接 1 消息          recv==sent, mismatch==0, errors==0
 #   [2] 并发冒烟    50 连接 × 3 消息        conn_ok==50, recv==150
 #   [3] fd 回收     并发跑完 fd 数回落       fds_after <= fds_base + 2
@@ -19,6 +19,9 @@
 #                                            ← epoll 的核心价值，note_stage5 §6.4
 #   [6] 流水吞吐    20 连接 × 500 消息       partial==0, mismatch==0
 #                                            ← 抓 send 半写未处理（wbuf 缺失）
+#   [7] 大包压力    20 连接 × 2000 × 4 KB    partial==0 且 RSS 不暴涨
+#                    合计 160 MB             ← 唯一能稳定撞出 EAGAIN 的阶段，
+#                                            走的是 handle_write 冲刷 wbuf 的路径
 #
 # 每个阶段都重启服务端，保证 fd 基线干净、失败不互相污染。
 #
@@ -166,7 +169,7 @@ info "客户端 = $CLIENT"
 # =============================================================================
 # [1] 功能冒烟：最小正确性闭环
 # =============================================================================
-hdr "[1/6] 功能冒烟：1 连接 1 消息"
+hdr "[1/7] 功能冒烟：1 连接 1 消息"
 info "这是最小的正确性闭环。它不通过，后面所有阶段的结果都没有意义。"
 echo
 
@@ -197,7 +200,7 @@ fi
 
 if [ "$ABORT" -eq 1 ] && [ "$ALL_MODE" -eq 0 ]; then
     echo
-    info "阶段 1 失败 → 中止。后面五个阶段此时全是连带噪音。"
+    info "阶段 1 失败 → 中止。后面六个阶段此时全是连带噪音。"
     info "想看完整体表现加 --all。"
     echo
     info "先查这两条（按命中率排序）："
@@ -216,7 +219,7 @@ fi
 # =============================================================================
 # [2] 并发冒烟 + [3] fd 回收
 # =============================================================================
-hdr "[2/6] 并发冒烟：50 连接 × 3 消息"
+hdr "[2/7] 并发冒烟：50 连接 × 3 消息"
 info "同时验证「能接受并发」和「能正确回声」。"
 echo
 
@@ -256,7 +259,7 @@ else
 fi
 
 # --- [3] fd 回收 ---
-hdr "[3/6] fd 回收：连接关闭后 fd 数是否回落"
+hdr "[3/7] fd 回收：连接关闭后 fd 数是否回落"
 info "客户端 50 条连接全部关闭后，服务端应当回收这 50 个 fd。"
 echo
 
@@ -282,7 +285,7 @@ stop_server
 # =============================================================================
 # [4] 空闲连接：epoll 的主场
 # =============================================================================
-hdr "[4/6] 空闲连接：500 条只连不发"
+hdr "[4/7] 空闲连接：500 条只连不发"
 info "这是 epoll 相对线程模型的本质优势，也是 note_stage5 §6.4 的验收项。"
 echo
 
@@ -337,7 +340,7 @@ stop_server
 # =============================================================================
 # [5] 线程数解耦：epoll 的核心价值
 # =============================================================================
-hdr "[5/6] 线程数与连接数解耦"
+hdr "[5/7] 线程数与连接数解耦"
 info "同样是 hold 模式，只改连接数，看服务端线程数是否变化。"
 info "要求：20 条和 500 条连接的线程数必须【相等】。"
 echo
@@ -384,7 +387,7 @@ fi
 # =============================================================================
 # [6] 流水线吞吐：抓 send 半写
 # =============================================================================
-hdr "[6/6] 流水线吞吐：20 连接 × 500 消息"
+hdr "[6/7] 流水线吞吐：20 连接 × 500 消息"
 info "客户端连续灌 500 条不等回复，专门暴露「send 遇 EAGAIN 直接丢数据」。"
 info "partial>0 或 mismatch>0 就是 wbuf + EPOLLOUT 还没做的证据。"
 echo
@@ -431,12 +434,98 @@ else
 fi
 
 # =============================================================================
+# [7] 大包压力：唯一能稳定撞出 EAGAIN 的阶段
+# =============================================================================
+hdr "[7/7] 大包压力：20 连接 × 2000 消息 × 4 KB"
+info "合计 160 MB。阶段 6 只有 1.28 MB，内核发送缓冲根本填不满，"
+info "所以 handle_write / wbuf 那条路径一次都不会被走到。"
+info "本阶段才真正压到「send 半写 → append_wbuf → EPOLLOUT → handle_write」。"
+echo
+
+P=6406
+if ! start_server "$P"; then
+    echo "  ✗ 服务端启动失败（端口 $P）"
+    sed 's/^/      /' "$TMPDIR_E/srv_${P}.log"
+    exit 2
+fi
+
+RSS_BEFORE=$(awk '/VmRSS/{print $2}' "/proc/$SERVER_PID/status" 2>/dev/null)
+S7_CONNS=20
+S7_MSGS=2000
+S7_SIZE=4096
+
+OUT="$(python3 "$CLIENT" --port="$P" --mode=throughput --conns="$S7_CONNS" \
+        --msgs="$S7_MSGS" --size="$S7_SIZE" --json 2>&1)"
+echo "$OUT" | sed 's/^/      /'
+S7_SENT=$(jget "$OUT" sent)
+S7_RECV=$(jget "$OUT" recv)
+S7_MIS=$(jget  "$OUT" mismatch)
+S7_ERR=$(jget  "$OUT" errors)
+S7_PART=$(jget "$OUT" partial)
+S7_EOFE=$(jget "$OUT" eof_early)
+S7_MPS=$(jget  "$OUT" msg_per_s)
+S7_MIB=$(jget  "$OUT" mib_per_s)
+S7_ELAP=$(jget "$OUT" elapsed_s)
+
+if kill -0 "$SERVER_PID" 2>/dev/null; then
+    check_alive || true
+    RSS_AFTER=$(awk '/VmRSS/{print $2}' "/proc/$SERVER_PID/status" 2>/dev/null)
+else
+    RSS_AFTER=-1
+fi
+stop_server
+
+EXPECTED_MSGS=$((S7_CONNS * S7_MSGS))
+echo
+if [ "$S7_SENT" = "$EXPECTED_MSGS" ] && [ "$S7_RECV" = "$EXPECTED_MSGS" ] \
+   && [ "$S7_MIS" = "0" ] && [ "$S7_ERR" = "0" ] \
+   && [ "$S7_PART" = "0" ] && [ "$S7_EOFE" = "0" ]; then
+    pass "$EXPECTED_MSGS 条 × ${S7_SIZE}B = $((EXPECTED_MSGS * S7_SIZE / 1048576)) MB 全部正确回显"
+    info "吞吐 $S7_MPS msg/s = $S7_MIB MiB/s，耗时 ${S7_ELAP}s"
+else
+    fail "大包压力下数据不完整"
+    info "sent=$S7_SENT recv=$S7_RECV mismatch=$S7_MIS errors=$S7_ERR partial=$S7_PART eof_early=$S7_EOFE"
+    if [ "$S7_PART" -gt 0 ]; then
+        info "partial>0 → wbuf 里存了数据但没被冲刷完，连接就被关了。"
+        info "  查三处：① flush() 遇 EAGAIN 有没有 append_wbuf + mod(IN|OUT)"
+        info "          ② handle_write 有没有 while(!wbuf_empty()) 循环继续 send"
+        info "          ③ 每条成功 send 后有没有 wbuf_retrieve(n) 推进偏移"
+        info "  ③ 漏了 → 同一段数据反复重发，客户端看到的字节数会远超预期。"
+    fi
+    if [ "$S7_ERR" -gt 0 ] && [ "$S7_RECV" = "0" ]; then
+        info "recv=0 → 服务端在大包下直接崩了。先看 check_alive 打印的日志。"
+    fi
+fi
+
+# --- RSS：wbuf 是否被正确释放 ---
+# 160 MB 流过 20 条连接。若 wbuf_retrieve 没把已发数据弹出去，
+# 每条连接的 _wbuf 会一路涨到 8 MB，20 条就是 160 MB 常驻。
+RSS_LIMIT=51200   # 50 MB，正常实现峰值在 5~10 MB
+if [ "$RSS_AFTER" -gt 0 ] && [ "$RSS_BEFORE" -gt 0 ]; then
+    RSS_GROW=$((RSS_AFTER - RSS_BEFORE))
+    info "服务端 RSS：${RSS_BEFORE}KB → ${RSS_AFTER}KB（增长 ${RSS_GROW}KB）"
+    echo
+    if [ "$RSS_AFTER" -le "$RSS_LIMIT" ]; then
+        pass "内存没有随数据量线性增长（${RSS_AFTER}KB < ${RSS_LIMIT}KB）"
+    else
+        fail "RSS 涨到 ${RSS_AFTER}KB —— wbuf 疑似没被释放"
+        info "160 MB 数据流过后内存应回落。涨到几十 MB 以上说明："
+        info "  · wbuf_retrieve 没被调用，或调用了但没真的 erase 掉前缀"
+        info "  · 或 flush() 的 early return 让 wbuf 只进不出"
+        info "修法：handle_write 里每 send 成功 n 字节就 wbuf_retrieve(n)，"
+        info "      wbuf 清空后 mod(fd, EPOLLIN) 摘掉 EPOLLOUT。"
+    fi
+else
+    skip "服务端进程已不在，无法采 RSS"
+fi
+
+# =============================================================================
 # 汇总
 # =============================================================================
-hdr "[7/7] 汇总"
+hdr "[8/8] 汇总"
 
 if [ "$FAILED" -eq 0 ]; then
-    echo "  ✓ PASS —— EpollServer 六个维度全部正常"
+    echo "  ✓ PASS —— EpollServer 七个维度全部正常"
     echo
     echo "  epoll 这一章可以收尾了。可以写进 README §五 证据表的数据："
     echo "    · ${HOLD_CONNS} 条空闲连接 / ${N_BIG} 个线程 / fd 数正确"
