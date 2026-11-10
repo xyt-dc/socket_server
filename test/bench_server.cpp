@@ -9,8 +9,10 @@
  *   这样 src/main.cpp 一行都不用改，测试代码全部隔离在 test/ 目录。
  *
  * 【用法】
+ *   ./test/bench_server --server=base --port=6201                      # 串行基线
  *   ./test/bench_server --server=thread --port=6201
  *   ./test/bench_server --server=pool --port=6201 --workers=4 --queue-cap=1024
+ *   ./test/bench_server --server=epoll --port=6201
  *   ./test/bench_server --server=pool --port=6201 --workers=4 --verbose
  *
  * 【为什么默认不打印每条消息】
@@ -29,6 +31,7 @@
 #include "mthread/pthread_server.hpp"
 #include "mthread/thread_pool_server.hpp"
 #include "mthread/Epoll_server.hpp"
+#include "base_echo_server.hpp"   // 串行基线（test-only，不进 src/）
 
 #include <csignal>
 #include <cstdlib>
@@ -50,7 +53,8 @@ void on_signal(int) {
 void usage(const char* prog) {
     std::cerr
         << "usage: " << prog << " [options]\n"
-        << "  --server=thread|pool   并发模型（默认 thread）\n"
+        << "  --server=base|thread|pool|epoll  并发模型（默认 thread）\n"
+        << "                         base = 串行基线（阻塞到底，同时只服务 1 条连接）\n"
         << "  --port=N               监听端口（默认 6200）\n"
         << "  --workers=N            线程池 worker 数（默认 4，仅 pool 有效）\n"
         << "  --queue-cap=N          线程池待办队列容量（默认 1024，仅 pool 有效）\n"
@@ -91,13 +95,15 @@ int main(int argc, char** argv) {
     if (port <= 0 || port > 65535) { std::cerr << "invalid port\n"; return 2; }
     if (workers == 0)              { std::cerr << "--workers must be > 0\n"; return 2; }
 
-    // ---------- 按模型构造（unique_ptr 保证两种类型都能装）----------
+    // ---------- 按模型构造（unique_ptr 保证多种类型都能装）----------
     std::unique_ptr<TcpServerBase> server;
-    if (model == "thread") {
+    if (model == "base") {
+        server = std::make_unique<BaseEchoServer>(port);
+    } else if (model == "thread") {
         server = std::make_unique<ThreadPerConnServer>(port);
     } else if (model == "pool") {
         server = std::make_unique<ThreadPool_server>(port, workers, queue_cap);
-    }else if (model == "epoll"){
+    } else if (model == "epoll"){
         server = std::make_unique<EpollServer>(port);
     } else {
         std::cerr << "unknown server model: " << model << "\n";
