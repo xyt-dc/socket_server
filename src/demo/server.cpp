@@ -8,8 +8,8 @@
 #include "tcp_server.hpp"
 
 /**
-server -> socket() -> bind() ->listen() ->accept() -> recv() ->close()
-client -> socket() ->connect() ->send() ->close()
+  server -> socket() -> bind() ->listen() ->accept() -> recv() ->close()
+  client -> socket() ->connect() ->send() ->close()
 
 */
 
@@ -22,7 +22,7 @@ client -> socket() ->connect() ->send() ->close()
 //     }
 
 //     std::cout<<"socket success"<<std::endl;
-    
+
 //     /**
 //     int setsockopt( int socket, int level, int option_name,const void *option_value, size_t ，ption_len);
 //     第一个参数socket是套接字描述符。
@@ -36,7 +36,7 @@ client -> socket() ->connect() ->send() ->close()
 //     if(opt <0 )
 //         perror("port reuse failed");
 //     struct sockaddr_in server_addr;
-    
+
 //     /**
 
 //     sin_family：地址族类型。对于 IPv4 网络通信，该值必须设置为 AF_INET。
@@ -49,7 +49,7 @@ client -> socket() ->connect() ->send() ->close()
 //     server_addr.sin_family = AF_INET;
 //     server_addr.sin_port = htons(3006);
 //     server_addr.sin_addr.s_addr = htonl(INADDR_ANY);
-    
+
 //     /**
 //         int bind(int sockfd, const struct sockaddr *addr, socklen_t addrlen);
 //         socket文件描述符  addr:构造出IP地址加端口号  addrlen:sizeof(addr)长度
@@ -89,7 +89,7 @@ client -> socket() ->connect() ->send() ->close()
 //             • > 0：成功接收并复制到应用层缓冲区的字节数。
 //             • == 0：连接已正常关闭（对方执行了有序关闭/EOF）。
 //             • < 0（Linux下为 -1，Windows下为 SOCKET_ERROR）：发生错误，具体错误码可通过 errno（Linux）或 WSAGetLastError()（Windows）查看。
-        
+
 //         */
 //         ssize_t n = recv(accept_res, buf, sizeof(buf), 0);
 //         if(n>0){
@@ -103,7 +103,7 @@ client -> socket() ->connect() ->send() ->close()
 //         }
 //         break;
 //      }
-    
+
 
 //     close(listen_fd);
 //     return 0;
