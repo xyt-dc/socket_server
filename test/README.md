@@ -19,15 +19,27 @@ test/
 | 文件 | 被测对象 | 怎么跑 |
 |---|---|---|
 | `blocking_queue_test.cpp` | `lib/blocking_queue.hpp` | `test/suites/02_blocking_queue.sh` |
-| `frame_test.cpp` | `lib/frame.hpp` | 手动（见下） |
+| `frame_test.cpp` | `lib/frame.hpp`（**96 断言**） | 手动（见下） |
 | `thread_pool_test.cpp` | `lib/thread_pool_v2.hpp` | 手动（见下） |
 
 **判据：不 import socket，不 fork 进程，毫秒级返回。** 这类测试改一行代码就能跑，
 是开发时的高频反馈来源。
 
-> ⚠️ `frame_test.cpp` 目前是**过期状态**：它还在断言 6 字节头（`11/6/10`），
-> 调 `getType()`（已被 `getCmd()` 取代），且自带一个和 `TLVDecoder` 重复的
-> `MiniParser`。**它现在编译不过，需要重写成 24B 头 + `TLVDecoder`。**
+`frame_test.cpp` 的运行方式：
+
+```bash
+g++ -std=c++17 -Wall -Wextra -Werror -Ilib test/unit/frame_test.cpp \
+    -o /tmp/frame_test && /tmp/frame_test
+# ----- pass=96  fail=0 ----- OK
+```
+
+它覆盖 11 组：字节布局（含大端落地校验）/ 空 body / 二进制 body /
+roundtrip（emoji + 极端 `seq`/`flag`）/ 粘包两帧 / 逐字节喂 / 头部分裂 /
+坏 magic → `BAD_ERROR` / **坏 checksum → `ERROR` 且后一帧仍可解** /
+超长 `len` / `seq`/`flag` 默认值与边界值。
+
+> 写这类测试的一条硬规矩：**长度断言一律写成 `kHeaderSize + body.size()`，
+> 禁止出现 `== 24` 这类魔法数字**。否则头长一改，整个测试文件全废。
 
 ### `tlv/` —— 协议层的 Python 参考实现
 
@@ -105,12 +117,18 @@ done
 
 ## 已知问题
 
-1. **`unit/frame_test.cpp` 已过期**，仍是 6 字节头 + `getType()`，编译不过。
-   协议层的回归兜底现在是 `tlv/tlv_probe.py` + `suites/05_tlv.sh`。
-2. **`net/bench_client.py` 发裸字节，不是 TLV 帧。**
-   `bench_server` 的 thread/pool/epoll 三个模型已全部改走 `TLVDecoder`，
-   裸字节的 magic 不匹配会被直接丢弃/断连 → `03`、`04`、`bench_compare` 目前 **FAIL**。
-   `base` 模型不受影响（它只走 `_msg_cb`）。
-   修法二选一：
-   - 给 `bench_server` 加 `--raw`，走 `set_message_callback` 老路径（改动小）
-   - 给 `bench_client.py` 加 `--tlv`，按 `tlv_probe.pack()` 组帧（更贴近真实协议，推荐）
+暂无。
+
+### 已修（保留记录，防止回退）
+
+1. ~~`unit/frame_test.cpp` 已过期~~ —— ✅ **已重写**。
+   现为 24 B 头 + `TLVDecoder`，96 断言全过，不再自带 `MiniParser`。
+2. ~~`bench_client.py` 发裸字节~~ —— ✅ **已加 `--tlv`**。
+   `base` 模型用裸字节（`--tlv` 不加），`thread`/`pool`/`epoll` 必须加 `--tlv`。
+   `03`、`04`、`05` 里已经改好，`bench_compare.py` 仍需手动传参。
+
+### 待办
+
+1. **`net/bench_compare.py` 的四模型对比表还没跑过。**
+   它调 `bench_client.py` 时需要区分 `base`（裸字节）与其余三个（`--tlv`），
+   否则 `base` 的对比数据会因协议不同而不公平。
