@@ -66,7 +66,8 @@ public:
 //
 // ★ 架构约束：本函数会让【调用者线程】执行池里的任意任务。
 //   只有当池里全是"短任务"时才安全；混进一个阻塞任务（比如
-//   while(true) recv 的 handle_client_read），reactor 线程就会被卡死，
+//   while(true) recv 的 handle_client_read），一旦handle——clietn——read加了延迟或者数据库查询的话，
+//   cpu就会阻塞，reactor 线程就会被卡死，
 //   整个服务器停止 accept。
 //   而"任务短"恰恰是 epoll 提供的 —— 这两个东西必须配对使用。
     bool try_run_one(){
