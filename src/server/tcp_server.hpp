@@ -7,6 +7,7 @@
 #include <cstring>
 #include <functional>
 #include <unistd.h>
+#include "frame.hpp"
 
 class TcpServerBase{
 public:
@@ -38,8 +39,13 @@ public:
 
     //设置业务
     using MessageCallback = std::function<void(int fd,const char* data,size_t len)>;
+    using FrameCallback = std::function<void(int fd,const FrameHeader& hdr,const std::string& body)>;
     void set_message_callback(MessageCallback cb){
         _msg_cb = std::move(cb);
+    }
+
+    void set_frame_callback(FrameCallback cb){
+        _frame_cb = std::move(cb);
     }
 
     /**
@@ -115,6 +121,7 @@ protected:
     int _port;
     std::atomic<bool> _running; // 被信号处理函数、accept 循环、工作线程同时访问，必须原子
     MessageCallback _msg_cb;
+    FrameCallback _frame_cb;
 
     //预留fd
     int _idle_fd = -1;

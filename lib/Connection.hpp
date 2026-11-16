@@ -11,6 +11,7 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <unistd.h>
+#include "frame.hpp"
 
 
 class Connection{
@@ -35,7 +36,17 @@ public:
 
     // 读缓冲区：粘包/拆包用。长度前缀协议解析时，半条消息留在这里等下次。
     // 阶段 3 实现，现在留空。
-    // std::vector<uint8_t> rbuf;
+    // TLVDecoder已经实现，这里通过接口调用——decoder，按照权限不同设计两个接口
+	// 当你手里有一个可修改的连接 Connection conn; 时，调用 conn.decoder().feed(data, len);（往解码器里喂新收到的数据，会改变 _decoder 的内部状态），编译器会匹配这一行，返回可修改的引用 TLVDecoder&。
+    // 假设你写了一个打印日志或监控状态的函数，为了防止手滑改坏连接，参数加了 const
+    TLVDecoder& decoder(){
+        return _decoder;
+    }
+
+    const TLVDecoder& decoder() const{
+        return _decoder;
+    }
+
 
 
     // 写缓冲区：send 遇 EAGAIN 时数据存这里，等 EPOLLOUT 再冲刷。
@@ -105,5 +116,5 @@ private:
     int _fd;
     size_t _woff;
     std::string _wbuf;
-    std::string _rbuf;
+    TLVDecoder _decoder;
 };
