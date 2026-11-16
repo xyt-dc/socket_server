@@ -9,11 +9,11 @@
  *   这样 src/main.cpp 一行都不用改，测试代码全部隔离在 test/ 目录。
  *
  * 【用法】
- *   ./test/bench_server --server=base --port=6201                      # 串行基线
- *   ./test/bench_server --server=thread --port=6201
- *   ./test/bench_server --server=pool --port=6201 --workers=4 --queue-cap=1024
- *   ./test/bench_server --server=epoll --port=6201
- *   ./test/bench_server --server=pool --port=6201 --workers=4 --verbose
+ *   ./build/bench_server --server=base --port=6201                      # 串行基线
+ *   ./build/bench_server --server=thread --port=6201
+ *   ./build/bench_server --server=pool --port=6201 --workers=4 --queue-cap=1024
+ *   ./build/bench_server --server=epoll --port=6201
+ *   ./build/bench_server --server=pool --port=6201 --workers=4 --verbose
  *
  * 【为什么默认不打印每条消息】
  *   原来的 echo 回调里有 std::cout << "[echo] fd=..."。
@@ -40,6 +40,7 @@
 #include <string>
 #include <sys/socket.h>
 #include <unistd.h>
+#include "protocol/tlv_defs.hpp"
 
 namespace {
 
@@ -125,6 +126,32 @@ int main(int argc, char** argv) {
             std::cout << "[echo] fd=" << fd << " " << len << " bytes" << std::endl;
         }
     });
+
+    //----------  TLV回调----------------
+    server->set_frame_callback([verbose,srv](int fd,const FrameHeader& hdr,const std::string& body){
+        //1.先过滤cmd：不是EchoReq就丢弃
+        if(hdr.cmd != static_cast<uint32_t>(Msg_frame::Cmd::EchoReq)){
+            if (verbose) {
+                std::cout << "[drop] fd=" << fd
+                          << " cmd=0x" << std::hex << hdr.cmd << std::dec
+                          << std::endl;
+            }
+            return;
+        }
+        //2.构造响应：body原样返回，is_resp = true 让 getCmd（）返回EchoResp
+        Msg_Handle_Echo resp(body,/*is_resp = */true);
+        resp.setSeq(hdr.seq);
+        std::string pkt = resp.pack();
+
+        //3.回包（pool 里 worker 独占连接，可直接 send）
+        srv->send(fd, pkt.data(), pkt.size());
+
+        if (verbose) {
+            std::cout << "[echo] fd=" << fd << " body=" << body
+                      << " (" << pkt.size() << " bytes)" << std::endl;
+        }
+    });
+
 
     g_server = server.get();
 

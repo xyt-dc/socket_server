@@ -28,9 +28,9 @@
 # 判据全部来自 bench_client.py 的 JSON 字段，不看服务端日志文案。
 #
 # 用法
-#   ./test/test_04_epoll.sh              # 默认：阶段 1 失败就中止（后面的都是连带噪音）
-#   ./test/test_04_epoll.sh --all        # 阶段 1 失败也继续跑完，看全局
-#   ./test/test_04_epoll.sh --no-build   # 跳过编译
+#   ./test/suites/04_epoll.sh              # 默认：阶段 1 失败就中止（后面的都是连带噪音）
+#   ./test/suites/04_epoll.sh --all        # 阶段 1 失败也继续跑完，看全局
+#   ./test/suites/04_epoll.sh --no-build   # 跳过编译
 #
 # 退出码
 #   0 = 全部 PASS
@@ -40,9 +40,9 @@
 
 set -uo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 BIN="$ROOT/build/bench_server"
-CLIENT="$ROOT/test/bench_client.py"
+CLIENT="$ROOT/test/net/bench_client.py"
 MODEL="epoll"
 
 NO_BUILD=0
@@ -180,7 +180,7 @@ if ! start_server "$P"; then
     exit 2
 fi
 
-OUT="$(python3 "$CLIENT" --port="$P" --mode=smoke --conns=1 --msgs=1 --size=64 --json 2>&1)"
+OUT="$(python3 "$CLIENT" --tlv --port="$P" --mode=smoke --conns=1 --msgs=1 --size=64 --json 2>&1)"
 echo "$OUT" | sed 's/^/      /'
 S1_SENT=$(jget "$OUT" sent)
 S1_RECV=$(jget "$OUT" recv)
@@ -233,7 +233,7 @@ FD_BASE=$(fd_count "$SERVER_PID")
 info "fd 基线 = $FD_BASE（stdin/out/err + listen + epoll）"
 echo
 
-OUT="$(python3 "$CLIENT" --port="$P" --mode=smoke --conns=50 --msgs=3 --size=64 --json 2>&1)"
+OUT="$(python3 "$CLIENT" --tlv --port="$P" --mode=smoke --conns=50 --msgs=3 --size=64 --json 2>&1)"
 echo "$OUT" | sed 's/^/      /'
 S2_OK=$(jget   "$OUT" conn_ok)
 S2_SENT=$(jget "$OUT" sent)
@@ -297,7 +297,7 @@ if ! start_server "$P"; then
 fi
 
 HOLD_CONNS=500
-python3 "$CLIENT" --port="$P" --mode=hold --conns="$HOLD_CONNS" --hold=6 \
+python3 "$CLIENT" --tlv --port="$P" --mode=hold --conns="$HOLD_CONNS" --hold=6 \
     --json >"$TMPDIR_E/hold500.log" 2>&1 &
 HOLD_PID=$!
 sleep 3   # 等连接全部落到服务端
@@ -347,7 +347,7 @@ echo
 
 measure_threads() {  # $1=port $2=conns → 输出线程数
     local port="$1" conns="$2"
-    python3 "$CLIENT" --port="$port" --mode=hold --conns="$conns" --hold=8 \
+    python3 "$CLIENT" --tlv --port="$port" --mode=hold --conns="$conns" --hold=8 \
         >/dev/null 2>&1 &
     HOLD_PID=$!
     sleep 2.5
@@ -398,7 +398,7 @@ if ! start_server "$P"; then
     exit 2
 fi
 
-OUT="$(python3 "$CLIENT" --port="$P" --mode=throughput --conns=20 --msgs=500 \
+OUT="$(python3 "$CLIENT" --tlv --port="$P" --mode=throughput --conns=20 --msgs=500 \
         --size=64 --json 2>&1)"
 echo "$OUT" | sed 's/^/      /'
 S6_RECV=$(jget "$OUT" recv)
@@ -454,7 +454,7 @@ S7_CONNS=20
 S7_MSGS=2000
 S7_SIZE=4096
 
-OUT="$(python3 "$CLIENT" --port="$P" --mode=throughput --conns="$S7_CONNS" \
+OUT="$(python3 "$CLIENT" --tlv --port="$P" --mode=throughput --conns="$S7_CONNS" \
         --msgs="$S7_MSGS" --size="$S7_SIZE" --json 2>&1)"
 echo "$OUT" | sed 's/^/      /'
 S7_SENT=$(jget "$OUT" sent)

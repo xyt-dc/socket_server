@@ -39,11 +39,11 @@
    表里如实写 DNF，不写 0，也不写「无数据」—— 0 会被误读成「很快」。
 
 【用法】
-    python3 test/bench_compare.py                    # 全部四个模型 × 三场景
-    python3 test/bench_compare.py --models=base,epoll # 只跑指定模型
-    python3 test/bench_compare.py --scenarios=hold,latency
-    python3 test/bench_compare.py --json             # 输出 JSON 便于二次处理
-    python3 test/bench_compare.py --no-build         # 跳过编译
+    python3 test/net/bench_compare.py                    # 全部四个模型 × 三场景
+    python3 test/net/bench_compare.py --models=base,epoll # 只跑指定模型
+    python3 test/net/bench_compare.py --scenarios=hold,latency
+    python3 test/net/bench_compare.py --json             # 输出 JSON 便于二次处理
+    python3 test/net/bench_compare.py --no-build         # 跳过编译
 ================================================================================
 """
 import argparse
@@ -56,9 +56,9 @@ import subprocess
 import sys
 import time
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 BENCH = os.path.join(ROOT, "build", "bench_server")
-CLIENT = os.path.join(ROOT, "test", "bench_client.py")
+CLIENT = os.path.join(ROOT, "test", "net", "bench_client.py")
 
 ALL_MODELS = ["base", "thread", "pool", "epoll"]
 ALL_SCENARIOS = ["hold", "latency", "pipeline"]

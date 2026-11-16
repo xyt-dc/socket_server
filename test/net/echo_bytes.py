@@ -8,17 +8,17 @@ echo_bytes.py —— 以文件为载荷的字节级回显校验（压测 / 回�
   3. hamlet 199,813 B 是 16 KB 内核发送缓冲的 12 倍，天生必触发 EAGAIN，
      不需要靠 --size 硬凑
 
-默认载荷：test/hamlet（199,813 B / 7082 行）
+默认载荷：test/net/data/hamlet（199,813 B / 7082 行）
 
 用法：
   # 单连接，原样回显校验
-  python3 test/echo_bytes.py 6471
+  python3 test/net/echo_bytes.py 6471
 
   # 重复 8 次约 1.6 MB，客户端先憋 2 秒制造服务端 EAGAIN
-  python3 test/echo_bytes.py 6471 --repeat=8 --noread=2
+  python3 test/net/echo_bytes.py 6471 --repeat=8 --noread=2
 
   # 指定别的文件
-  python3 test/echo_bytes.py 6471 --file=/etc/services --repeat=20
+  python3 test/net/echo_bytes.py 6471 --file=/etc/services --repeat=20
 
 退出码：
   0  字节级完全一致
@@ -34,9 +34,9 @@ import threading
 import time
 from pathlib import Path
 
-# 项目根 = 本脚本所在目录的上一级
-ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_FILE = ROOT / "test" / "hamlet"
+# 项目根 = test/net/ 往上三级
+ROOT = Path(__file__).resolve().parent.parent.parent
+DEFAULT_FILE = ROOT / "test" / "net" / "data" / "hamlet"
 
 RECV_CHUNK = 65536
 

@@ -3,7 +3,7 @@
  *  blocking_queue_test.cpp  ——  BlockingQueue<T> 的单元测试
  * ============================================================================
  *
- * 由 test/test_02_blocking_queue.sh 负责编译和运行。
+ * 由 test/suites/02_blocking_queue.sh 负责编译和运行。
  *
  * 【为什么用自定义 CHECK 而不用 assert】
  *   assert 在定义 NDEBUG 时（-O2 常见）会被整体删除，测试会静默失效。

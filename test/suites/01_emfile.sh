@@ -18,10 +18,10 @@
 #   CPU >= 30% 或   日志增长 >= 100 行  => FAIL（忙等自旋）
 #
 # 用法
-#   ./test/test_01_emfile.sh
-#   PORT=7000 ./test/test_01_emfile.sh
-#   FD_LIMIT=32 CONN=64 ./test/test_01_emfile.sh
-#   ./test/test_01_emfile.sh --no-build     # 跳过编译，直接用现有二进制
+#   ./test/suites/01_emfile.sh
+#   PORT=7000 ./test/suites/01_emfile.sh
+#   FD_LIMIT=32 CONN=64 ./test/suites/01_emfile.sh
+#   ./test/suites/01_emfile.sh --no-build     # 跳过编译，直接用现有二进制
 #
 # 退出码
 #   0 = PASS   1 = FAIL   2 = 环境/构建问题
@@ -29,7 +29,7 @@
 
 set -uo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 BIN="$ROOT/build/socket_server"
 
 PORT="${PORT:-6101}"

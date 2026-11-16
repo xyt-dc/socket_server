@@ -7,7 +7,7 @@
 # 被测代码
 #   lib/blocking_queue.hpp   —— 有界阻塞队列（生产者/消费者）
 #
-# 测试内容（10 个用例，见 test/blocking_queue_test.cpp）
+# 测试内容（10 个用例，见 test/unit/blocking_queue_test.cpp）
 #   1  基本推拉              6  优雅关闭（close 后已排队的元素仍能取完）
 #   2  FIFO 顺序             7  空队列 pop 阻塞 -> push 唤醒
 #   3  move-only 类型        8  队满 push 阻塞 -> pop 唤醒（不丢数据）
@@ -29,9 +29,9 @@
 #   本脚本会自动检测并加这个前缀。
 #
 # 用法
-#   ./test/test_02_blocking_queue.sh
-#   ./test/test_02_blocking_queue.sh --no-tsan     # 跳过 TSan（更快）
-#   ./test/test_02_blocking_queue.sh --only-tsan   # 只跑 TSan
+#   ./test/suites/02_blocking_queue.sh
+#   ./test/suites/02_blocking_queue.sh --no-tsan     # 跳过 TSan（更快）
+#   ./test/suites/02_blocking_queue.sh --only-tsan   # 只跑 TSan
 #
 # 退出码
 #   0 = 全部 PASS   1 = 有 FAIL   2 = 环境/构建问题
@@ -39,8 +39,8 @@
 
 set -uo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SRC="$ROOT/test/blocking_queue_test.cpp"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+SRC="$ROOT/test/unit/blocking_queue_test.cpp"
 OUT_DIR="$ROOT/build/test"
 
 DO_O0=1

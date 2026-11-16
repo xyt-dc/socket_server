@@ -31,8 +31,8 @@
 #   C: 数字对比即可，无数值断言
 #
 # 用法
-#   ./test/test_03_pool_starvation.sh
-#   ./test/test_03_pool_starvation.sh --no-build
+#   ./test/suites/03_pool_starvation.sh
+#   ./test/suites/03_pool_starvation.sh --no-build
 #
 # 退出码
 #   0 = 全部 PASS（缺陷被稳定复现）
@@ -42,9 +42,9 @@
 
 set -uo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 BIN="$ROOT/build/bench_server"
-CLIENT="$ROOT/test/bench_client.py"
+CLIENT="$ROOT/test/net/bench_client.py"
 
 NO_BUILD=0
 [ "${1:-}" = "--no-build" ] && NO_BUILD=1
@@ -156,14 +156,14 @@ run_starvation() {
     fi
 
     # 2 条连接只连不发，hold 8 秒
-    python3 "$CLIENT" --port="$port" --mode=hold --conns=2 --hold=8 \
+    python3 "$CLIENT" --tlv --port="$port" --mode=hold --conns=2 --hold=8 \
         >"$TMPDIR_T/hold_${model}.log" 2>&1 &
     HOLD_PID=$!
     sleep 1.5   # 等这 2 条连接真正落到 worker 上
 
     # 第 3 条连接：发 3 条 64 字节消息，看有没有回应
     local out
-    out="$(python3 "$CLIENT" --port="$port" --mode=smoke \
+    out="$(python3 "$CLIENT" --tlv --port="$port" --mode=smoke \
             --conns=1 --msgs=3 --size=64 --json 2>&1)"
     local rc=$?
 
@@ -220,19 +220,19 @@ info "场景：workers=1 queue-cap=1，占满 worker + 塞满队列，第 3 条�
 echo
 
 if start_server pool 6213 --workers=1 --queue-cap=1; then
-    python3 "$CLIENT" --port=6213 --mode=hold --conns=1 --hold=8 \
+    python3 "$CLIENT" --tlv --port=6213 --mode=hold --conns=1 --hold=8 \
         >"$TMPDIR_T/b_hold.log" 2>&1 &
     HOLD_PID=$!
     sleep 1.5   # worker 被占住
 
     # 这条进的队列，也没人跑它
-    python3 "$CLIENT" --port=6213 --mode=hold --conns=1 --hold=8 \
+    python3 "$CLIENT" --tlv --port=6213 --mode=hold --conns=1 --hold=8 \
         >"$TMPDIR_T/b_hold2.log" 2>&1 &
     HOLD2_PID=$!
     sleep 1.5   # 队列被占满
 
     # 第 3 条：submit 应该失败 → 服务端 close(fd) → 客户端立刻 EOF
-    B_OUT="$(python3 "$CLIENT" --port=6213 --mode=smoke --conns=1 --msgs=1 \
+    B_OUT="$(python3 "$CLIENT" --tlv --port=6213 --mode=smoke --conns=1 --msgs=1 \
               --size=64 --json 2>&1)"
     echo "$B_OUT" | sed 's/^/      /'
 
@@ -274,7 +274,7 @@ echo
 
 C_CONNS=20
 if start_server thread 6214; then
-    python3 "$CLIENT" --port=6214 --mode=hold --conns="$C_CONNS" --hold=6 \
+    python3 "$CLIENT" --tlv --port=6214 --mode=hold --conns="$C_CONNS" --hold=6 \
         >/dev/null 2>&1 &
     HOLD_PID=$!
     sleep 2
@@ -285,7 +285,7 @@ if start_server thread 6214; then
 fi
 
 if start_server pool 6215 --workers=4 --queue-cap=1024; then
-    python3 "$CLIENT" --port=6215 --mode=hold --conns="$C_CONNS" --hold=6 \
+    python3 "$CLIENT" --tlv --port=6215 --mode=hold --conns="$C_CONNS" --hold=6 \
         >/dev/null 2>&1 &
     HOLD_PID=$!
     sleep 2

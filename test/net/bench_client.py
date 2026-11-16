@@ -26,7 +26,16 @@
   ./bench_client.py --port=6201 --mode=throughput --conns=20 --msgs=500
   ./bench_client.py --port=6201 --mode=hold --conns=200 --hold=5
   ./bench_client.py --port=6201 --json      # 机器可读，方便脚本比对
-  python3 test/bench_client.py --port=6401 --mode=smoke --conns=1 --msgs=1
+  python3 test/net/bench_client.py --port=6401 --mode=smoke --conns=1 --msgs=1
+
+【--tlv：为什么必须存在】
+  base 模型只走 set_message_callback（收到什么原样回什么），发裸字节就行。
+  thread / pool / epoll 都走 TLVDecoder：裸字节没有 magic，第一帧就 BAD_ERROR
+  → 服务端直接关连接，客户端看到的是 TimeoutError。
+  所以压测这三条链路时必须用 --tlv，否则测的根本不是同一条代码路径。
+
+  ./bench_client.py --port=6201 --mode=latency    --conns=20 --msgs=100 --tlv
+  ./bench_client.py --port=6201 --mode=throughput --conns=10 --msgs=500 --tlv
 
 退出码
   0 = 全部正确     1 = 有 mismatch/error     2 = 参数或环境问题
@@ -36,10 +45,35 @@
 import argparse
 import asyncio
 import json
+import pathlib
 import socket
 import statistics
 import sys
 import time
+
+
+_PROBE = None
+
+
+def _load_probe():
+    """按需加载同仓库的 test/tlv/tlv_probe.py（协议唯一真值来源）。
+
+    路径按 __file__ 解析，所以从任何 cwd 调用都能找到；
+    不用 sys.path 注入，避免和别的同名模块串味。
+    """
+    global _PROBE
+    if _PROBE is not None:
+        return _PROBE
+    import importlib.util
+
+    path = pathlib.Path(__file__).resolve().parent.parent / "tlv" / "tlv_probe.py"
+    if not path.exists():
+        raise SystemExit(f"找不到协议探针: {path}")
+    spec = importlib.util.spec_from_file_location("tlv_probe", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    _PROBE = mod
+    return mod
 
 
 class Stats:
@@ -131,6 +165,121 @@ async def read_exact_or_classify(r, n: int, st: Stats, timeout: float = 5.0):
         return None
 
 
+# =====================================================================
+# framing：把「线上字节怎么组帧」抽出来，让四种 mode 不必到处 if args.tlv
+# =====================================================================
+class RawFraming:
+    """原样字节。只对 base 模型有效（它不碰 TLVDecoder）。"""
+
+    name = "raw"
+    overhead = 0
+
+    def encode(self, payload: bytes, seq: int) -> bytes:
+        return payload
+
+    async def read_one(self, r, size: int, st: "Stats", timeout: float = 5.0):
+        return await read_exact_or_classify(r, size, st, timeout)
+
+    async def read_many(self, r, count: int, size: int, st: "Stats",
+                        timeout: float = 30.0):
+        need = count * size
+        got = bytearray()
+        while len(got) < need:
+            try:
+                chunk = await asyncio.wait_for(r.read(need - len(got)), timeout)
+            except asyncio.TimeoutError:
+                st.errors += 1
+                break
+            except (ConnectionResetError, BrokenPipeError):
+                st.errors += 1
+                break
+            if not chunk:
+                st.eof_early += 1
+                break
+            got.extend(chunk)
+        return [bytes(got[i * size:(i + 1) * size]) for i in range(len(got) // size)]
+
+
+class TlvFraming:
+    """24B 定长头 + body。服务端 TLVDecoder 走的就是这条路。
+
+    每条连接必须独占一个 Decoder —— 分帧器持有半帧状态，
+    多连接共用会把 A 的半帧拼到 B 的头后面。
+    """
+
+    name = "tlv"
+
+    def __init__(self):
+        self.probe = _load_probe()
+        self.overhead = self.probe.HEADER_SIZE
+        self.dec = self.probe.Decoder()
+        self.bad_frames = 0
+
+    def encode(self, payload: bytes, seq: int) -> bytes:
+        return self.probe.pack(self.probe.Cmd.ECHO_REQ, payload, seq=seq, flag=0)
+
+    async def read_one(self, r, size: int, st: "Stats", timeout: float = 5.0):
+        while True:
+            # 先看缓冲区里攒够没有（流水线模式下这里常能直接出帧）
+            try:
+                got = self.dec.next()
+            except ValueError as e:
+                self.bad_frames += 1
+                st.errors += 1
+                if len(st.err_detail) < 5:
+                    st.err_detail.append(f"拆帧失败: {e}")
+                return None
+
+            if got is not None:
+                h, body = got
+                # 响应帧的 cmd 必须是 EchoResp；不对说明服务端回错了消息类型
+                if h["cmd"] != self.probe.Cmd.ECHO_RSP:
+                    st.errors += 1
+                    if len(st.err_detail) < 5:
+                        st.err_detail.append(
+                            f"cmd 期望 0x{self.probe.Cmd.ECHO_RSP:08X} "
+                            f"实收 0x{h['cmd']:08X}"
+                        )
+                    return None
+                return body
+
+            try:
+                chunk = await asyncio.wait_for(r.read(65536), timeout)
+            except asyncio.TimeoutError:
+                st.errors += 1
+                return None
+            except (ConnectionResetError, BrokenPipeError):
+                st.errors += 1
+                return None
+
+            if not chunk:
+                # 对端关了。缓冲里还有残渣 = 半帧，这才是真正的数据完整性问题
+                if self.dec.buf:
+                    st.partial += 1
+                    if len(st.err_detail) < 5:
+                        st.err_detail.append(f"半帧残留 {len(self.dec.buf)} 字节")
+                else:
+                    st.eof_early += 1
+                return None
+
+            self.dec.feed(chunk)
+
+    async def read_many(self, r, count: int, size: int, st: "Stats",
+                        timeout: float = 30.0):
+        bodies = []
+        for _ in range(count):
+            b = await self.read_one(r, size, st, timeout)
+            if b is None:
+                break
+            bodies.append(b)
+        return bodies
+
+
+def make_framing(args):
+    """按 --tlv 选组帧方式。决策点只有这一处。"""
+    return TlvFraming() if args.tlv else RawFraming()
+
+
 async def connect(host, port, st: Stats, timeout=5.0):
     """建连；失败计入 refused/conn_fail，返回 None 而不是抛异常。"""
     try:
@@ -154,13 +303,14 @@ async def mode_smoke(args, st: Stats):
         r, w = await connect(args.host, args.port, st)
         if w is None:
             return
+        fr = make_framing(args)
         try:
             for seq in range(args.msgs):
                 payload = make_payload(cid, seq, args.size)
-                w.write(payload)
+                w.write(fr.encode(payload, seq))
                 await w.drain()
                 st.sent += 1
-                echoed = await read_exact_or_classify(r, len(payload), st)
+                echoed = await fr.read_one(r, len(payload), st)
                 if echoed is None:
                     return
                 st.recv += 1
@@ -182,14 +332,15 @@ async def mode_latency(args, st: Stats):
         r, w = await connect(args.host, args.port, st)
         if w is None:
             return
+        fr = make_framing(args)
         try:
             for seq in range(args.msgs):
                 payload = make_payload(cid, seq, args.size)
                 t0 = time.perf_counter()
-                w.write(payload)
+                w.write(fr.encode(payload, seq))
                 await w.drain()
                 st.sent += 1
-                echoed = await read_exact_or_classify(r, len(payload), st)
+                echoed = await fr.read_one(r, len(payload), st)
                 if echoed is None:
                     return
                 st.latencies.append(time.perf_counter() - t0)
@@ -215,36 +366,27 @@ async def mode_throughput(args, st: Stats):
         r, w = await connect(args.host, args.port, st)
         if w is None:
             return
-        total = args.msgs * args.size
+        fr = make_framing(args)
         payloads = [make_payload(cid, seq, args.size) for seq in range(args.msgs)]
         try:
             t0 = time.perf_counter()
-            for p in payloads:
-                w.write(p)
+            for seq, p in enumerate(payloads):
+                w.write(fr.encode(p, seq))
             await w.drain()
             st.sent += args.msgs
 
-            # 累计读完 total 字节
-            got = bytearray()
-            while len(got) < total:
-                try:
-                    chunk = await asyncio.wait_for(r.read(total - len(got)), 30.0)
-                except asyncio.TimeoutError:
-                    st.errors += 1
-                    break
-                if not chunk:
-                    # 服务端提前关闭（例如背压丢弃了这条连接）
-                    st.errors += 1
-                    break
-                got.extend(chunk)
-            st.recv += len(got) // args.size
+            # 不管 raw 还是 tlv，都按「条」收齐，比对口径才统一
+            bodies = await fr.read_many(r, args.msgs, args.size, st)
+            st.recv += len(bodies)
             st.latencies.append(time.perf_counter() - t0)
 
-            # 逐条比对（按 size 切分）
-            expected = b"".join(payloads)
-            if bytes(got) != expected:
-                # 允许长度不一致时只记一次，避免刷屏
+            # 逐条比对；有差异只记一次，避免刷屏
+            if b"".join(bodies) != b"".join(payloads):
                 st.mismatch += 1
+                if len(st.err_detail) < 5:
+                    st.err_detail.append(
+                        f"吞吐链路数据不一致: 收 {len(bodies)}/{args.msgs} 条"
+                    )
         finally:
             w.close()
             try:
@@ -294,6 +436,10 @@ def main():
     ap.add_argument("--size", type=int, default=64, help="单条消息字节数")
     ap.add_argument("--hold", type=float, default=3.0, help="hold 模式保持秒数")
     ap.add_argument("--json", action="store_true", help="输出 JSON")
+    ap.add_argument(
+        "--tlv", action="store_true",
+        help="按 24B TLV 帧收发（thread/pool/epoll 必须加；base 不要加）",
+    )
     args = ap.parse_args()
 
     if args.conns <= 0 or args.msgs <= 0 or args.size <= 0:
@@ -311,6 +457,7 @@ def main():
 
     out = st.summary()
     out["mode"] = args.mode
+    out["framing"] = "tlv" if args.tlv else "raw"
     out["conns_target"] = args.conns
     out["payload_size"] = args.size
     out["elapsed_s"] = round(elapsed, 3)
@@ -321,7 +468,7 @@ def main():
     if args.json:
         print(json.dumps(out, indent=2))
     else:
-        print(f"mode={out['mode']}  elapsed={out['elapsed_s']}s")
+        print(f"mode={out['mode']}  framing={out['framing']}  elapsed={out['elapsed_s']}s")
         print(f"connections   ok={out['conn_ok']}  fail={out['conn_fail']}  refused={out['refused']}")
         print(f"messages      sent={out['sent']}  recv={out['recv']}  mismatch={out['mismatch']}  errors={out['errors']}")
         if out["eof_early"] or out["partial"]:

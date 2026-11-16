@@ -28,17 +28,17 @@ wbuf 水位公式（也是精确的）
 
 用法
     # 自动起服务 + strace（推荐，一条命令出结论）
-    python3 test/handle_write_trigger.py --mode=baseline
-    python3 test/handle_write_trigger.py --mode=slow-read
-    python3 test/handle_write_trigger.py --mode=stall  --stall=8
-    python3 test/handle_write_trigger.py --mode=never-read --hold=5
+    python3 test/net/handle_write_trigger.py --mode=baseline
+    python3 test/net/handle_write_trigger.py --mode=slow-read
+    python3 test/net/handle_write_trigger.py --mode=stall  --stall=8
+    python3 test/net/handle_write_trigger.py --mode=never-read --hold=5
 
     # 用 hamlet 当载荷
-    python3 test/handle_write_trigger.py --mode=stall --file=test/hamlet --repeat=42
+    python3 test/net/handle_write_trigger.py --mode=stall --file=test/net/data/hamlet --repeat=42
 
     # 自己起服务 / 想用 gdb 挂上去（--hold 会在峰值处停下并打印 pid）
     ./build/bench_server --server=epoll --port=6600 &
-    python3 test/handle_write_trigger.py --mode=stall --no-spawn --port=6600 --hold=30
+    python3 test/net/handle_write_trigger.py --mode=stall --no-spawn --port=6600 --hold=30
 
 gdb 调试建议
     b Epoll_server.hpp:<handle_write 里的 send 那行>
@@ -55,7 +55,7 @@ import threading
 import time
 
 KREAD = 4096                     # 与 EpollServer::KReadBuf 保持一致
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 BENCH = os.path.join(ROOT, 'build', 'bench_server')
 
 # strace 输出（-s 0 => 字符串恒为 ""，配合 \s* 容忍自动折行）

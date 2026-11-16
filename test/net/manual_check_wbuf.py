@@ -9,7 +9,7 @@
   如果 handle_write 从不消费 wbuf（缺 wbuf_retrieve），
   它每轮都会把整个 wbuf 重新 send 一遍 -> 客户端收到的字节数 >> N。
 
-用法: python3 test/manual_check_wbuf.py [port] [MB]
+用法: python3 test/net/manual_check_wbuf.py [port] [MB]
 """
 import socket
 import sys

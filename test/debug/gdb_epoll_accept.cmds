@@ -2,7 +2,7 @@
 # gdb 调试脚本：定位 EpollServer 的 accept 阻塞问题
 #
 # 用法（在仓库根目录执行）：
-#   gdb -q -batch -x test/gdb_epoll_accept.cmds ./build/bench_server
+#   gdb -q -batch -x test/debug/gdb_epoll_accept.cmds ./build/bench_server
 #
 # 注意：run 之后服务端会阻塞在 epoll_wait 等连接，
 #      所以必须另开一个终端/后台进程去连它，否则断点永远不会命中。
