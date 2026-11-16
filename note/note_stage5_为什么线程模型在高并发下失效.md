@@ -1,7 +1,7 @@
 # 阶段5：为什么线程模型在高并发下必然失效 —— 从 thread-per-connection 到 reactor
 
 对应文件：`src/mthread/pthread_server.hpp`、`src/mthread/thread_pool_server.hpp`、
-`test/test_03_pool_starvation.sh`、`test/bench_server.cpp`、`test/bench_client.py`
+`test/suites/03_pool_starvation.sh`、`test/net/bench_server.cpp`、`test/net/bench_client.py`
 
 前三篇记的是"怎么写对"，这一篇记的是**"为什么这条路走不通"**。
 
@@ -96,15 +96,15 @@ $ ulimit -n   → 1048576  （单进程 fd 上限 100 万，epoll 能吃满）
 
 # 二、实测：三个缺陷的完整证据
 
-跑法：`./test/test_03_pool_starvation.sh`
+跑法：`./test/suites/03_pool_starvation.sh`
 
 测试脚手架三角：
 
-- `test/bench_server.cpp` —— 压测专用服务端入口，`--server=thread|pool` 运行时切换模型。
+- `test/net/bench_server.cpp` —— 压测专用服务端入口，`--server=thread|pool` 运行时切换模型。
   单独放 `test/` 下，**`src/main.cpp` 一行没动**。
-- `test/bench_client.py` —— asyncio 客户端。选它是因为 **2000 连接只占 1 个客户端线程**，
+- `test/net/bench_client.py` —— asyncio 客户端。选它是因为 **2000 连接只占 1 个客户端线程**，
   这样测出来的数字能归因到服务端，而不是客户端自己的调度开销。
-- `test/test_03_pool_starvation.sh` —— 编排 + 断言。
+- `test/suites/03_pool_starvation.sh` —— 编排 + 断言。
 
 ## 实验 A：worker 占满后，新连接彻底饿死
 
@@ -487,7 +487,7 @@ reactor：    并发连接数 ≤ RLIMIT_NOFILE（可调到 1,000,000+）
 
 ```bash
 # 改造前（pool 模型）
-./test/test_03_pool_starvation.sh
+./test/suites/03_pool_starvation.sh
   → pool: 第 3 条连接 recv=0, errors=1
 
 # 改造后（epoll 模型）

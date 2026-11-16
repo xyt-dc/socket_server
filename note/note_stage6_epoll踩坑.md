@@ -1,7 +1,7 @@
 # 阶段6：epoll 踩坑全记录 —— 从三原语封装到写路径闭合
 
 对应文件：`lib/epoll.hpp`、`lib/Connection.hpp`、`src/mthread/Epoll_server.hpp`、
-`test/test_04_epoll.sh`、`test/manual_check_wbuf.py`、`test/bigfile_echo.py`
+`test/suites/04_epoll.sh`、`test/net/manual_check_wbuf.py`、`test/net/bigfile_echo.py`
 
 前五篇记的是"怎么把线程模型写对"，以及"为什么线程模型必然失效"。
 这一篇记的是**把 reactor 真正写出来时，每一个能让它崩、卡、丢数据、假绿的地方**。

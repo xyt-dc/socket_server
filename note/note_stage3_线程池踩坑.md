@@ -897,7 +897,7 @@ int main() {
 2. **不会 abort** —— 一个失败后继续跑剩下的，一次就能看到所有问题
 3. 能统计数量，一眼看出严重程度
 
-**顺带**：`return g_fail == 0 ? 0 : 1;` 让 shell 脚本能用 `$?` 判断成败 —— 这是 [test_02_blocking_queue.sh](../test/test_02_blocking_queue.sh) 和 cpp 测试之间的唯一接口。
+**顺带**：`return g_fail == 0 ? 0 : 1;` 让 shell 脚本能用 `$?` 判断成败 —— 这是 [test_02_blocking_queue.sh](../test/suites/02_blocking_queue.sh) 和 cpp 测试之间的唯一接口。
 
 ***
 

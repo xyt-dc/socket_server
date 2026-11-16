@@ -3,14 +3,14 @@
 对应流程：`accept() 失败 -> errno 分类 -> 退避/节流/预留 fd -> 恢复`
 
 本篇记录 `ThreadPerConnServer` 从"一遇 fd 耗尽就空转烧 CPU"到"能优雅扛住"的全过程，
-包括原始代码的每处缺陷、`test/test_01_emfile.sh` 失败的根因、修复方案，以及几个
+包括原始代码的每处缺陷、`test/suites/01_emfile.sh` 失败的根因、修复方案，以及几个
 "为什么必须这么写"的原理总结。
 
 ***
 
 ## 一、修复前的真实数据
 
-用 `test/test_01_emfile.sh`（`ulimit -n 24`，40 个客户端）测原始版本：
+用 `test/suites/01_emfile.sh`（`ulimit -n 24`，40 个客户端）测原始版本：
 
 | 指标 | 修复前 | 修复后 |
 |---|---|---|
