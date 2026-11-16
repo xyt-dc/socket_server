@@ -78,6 +78,7 @@
 #include <thread>
 #include <unistd.h>
 #include "jthread.hpp"
+#include <memory>
 
 class ThreadPerConnServer : public TcpServerBase{
 public:
@@ -164,11 +165,30 @@ protected:
 private:
     void client_thread_func(int client_fd){
         char buf[4096];
+        //这里面的如果不用智能指针的话status：：error逻辑就要用goto，c++有智能指针后就要避免goto
+        //TLVDecoder decoder;
+        std::unique_ptr<TLVDecoder> decoder = std::make_unique<TLVDecoder>();
+        FrameHeader hdr;
+        std::string body;
         while (_running) {
             // 不能用 MSG_PEEK：只窥探不消费，同一份数据会被无限次读到 -> 死循环
             ssize_t n = recv(client_fd, buf, sizeof(buf), 0);
             if (n > 0) {
-                if (_msg_cb) _msg_cb(client_fd, buf, static_cast<size_t>(n));
+                // if (_msg_cb) _msg_cb(client_fd, buf, static_cast<size_t>(n))
+                decoder->appendData(buf,static_cast<size_t>(n));
+                for(;;){
+                    auto st = decoder->tryDecode(hdr,body);
+                    if(st == TLVDecoder::Status::BAD_ERROR ){
+                        close(client_fd);
+                        return;
+                    }
+                    if(st == TLVDecoder::Status::NEED_MORE){
+                        break;
+                    }
+                    if(st == TLVDecoder::Status::OK){
+                        if(_frame_cb) _frame_cb(client_fd,hdr,body);
+                    }
+                }
             } else if (n == 0) {
                 std::cout << "client " << client_fd << " closed" << std::endl;
                 break;

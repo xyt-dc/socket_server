@@ -37,17 +37,10 @@ int main(int argc, char** argv) {
     ThreadPerConnServer server(port);//主要在这里切换
 
     // 业务回调：原样回写（echo），方便用 nc / telnet 手动验证
-    server.set_message_callback([](int fd, const char* data, size_t len) {
+    server.set_message_callback([&server](int fd, const char* data, size_t len) {
         size_t sent = 0;
-        while (sent < len) {
-            // MSG_NOSIGNAL：对端已关闭时返回 EPIPE，而不是触发 SIGPIPE 杀掉进程
-            ssize_t n = send(fd, data + sent, len - sent, MSG_NOSIGNAL);
-            if (n <= 0) {
-                if (n < 0) perror("send");
-                return;
-            }
-            sent += static_cast<size_t>(n);
-        }
+        // MSG_NOSIGNAL：对端已关闭时返回 EPIPE，而不是触发 SIGPIPE 杀掉进程
+        server.send(fd, data , len);
         std::cout << "[echo] fd=" << fd << " " << len << " bytes" << std::endl;
     });
 

@@ -18,6 +18,16 @@ __pycache__/
 # 测试二进制与日志
 test/bq_*
 test/pooltest
+test/**/pooltest*
+test/**/*_O0
+test/**/*_O2
+test/**/*_tsan
+test/**/*.log
 *.o
 *.o.d
 a.out
+
+# 预编译头（26MB 的 PCH，g++ 默认会把 frame.hpp 输出成无扩展名的 frame）
+frame
+*.gch
+*.pch

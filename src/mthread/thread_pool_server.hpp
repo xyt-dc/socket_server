@@ -22,6 +22,8 @@
 #include "jthread.hpp"
 #include "Iothread_pool.hpp"
 #include <unordered_set>
+#include "frame.hpp"
+#include <memory>
 
 const size_t thread_count = std::thread::hardware_concurrency();
 
@@ -135,11 +137,28 @@ private:
 //注意⚠️子类不要和父类去同样的名字，这是隐藏不是重载，重载必须不同参数
     void handle_client_read(int client_fd){
         char buf[4096];
+        auto decoder = std::make_unique<TLVDecoder>();
+        FrameHeader hdr;
+        std::string body;
+        bool broken = false;
         while (true) {
             // 不能用 MSG_PEEK：只窥探不消费，同一份数据会被无限次读到 -> 死循环
             ssize_t n = recv(client_fd, buf, sizeof(buf), 0);
             if (n > 0) {
-                if (_msg_cb) _msg_cb(client_fd, buf, static_cast<size_t>(n));
+                // if (_msg_cb) _msg_cb(client_fd, buf, static_cast<size_t>(n));
+                decoder->appendData(buf,n);
+                for(;;){
+                    auto st = decoder->tryDecode(hdr,body);
+                    if(st == TLVDecoder::Status::NEED_MORE )break;
+
+                    if(st == TLVDecoder::Status::BAD_ERROR){
+                        broken = true;
+                    }
+                    if(st == TLVDecoder::Status::OK){
+                        if(_frame_cb) _frame_cb(client_fd, hdr,body);
+                    }
+                    if(broken) break;
+                }
             } else if (n == 0) {
                 std::cout << "client " << client_fd << " closed" << std::endl;
                 break;

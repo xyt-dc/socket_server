@@ -211,15 +211,59 @@ private:
         char buf[KReadBuf];
         //send_wbuf(fd,buf,KReadBuf);
         while(true){
+            
+            //std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
             ssize_t n = ::recv(fd,buf,sizeof(buf),0);
             if (n > 0) {
-                if (_msg_cb) 
-                    _msg_cb(fd, buf, static_cast<size_t>(n));
+                // std::cout << "[recv] n=" << n << " hex=";
+                // for (ssize_t i = 0; i < n; ++i) printf("%02x ", (unsigned char)buf[i]);
+                // std::cout << std::endl;
+                // if (_msg_cb) 
+                //     _msg_cb(fd, buf, static_cast<size_t>(n));
+                // {
+                //     std::lock_guard<std::mutex> lk(_mtx);
+                //     if (_conns.find(fd) == _conns.end()) return;   // 回调里把我关了，别再 recv
+                // }
+                // continue;
+
+                /**
+                 * 这里注意一下，使用RPC后不只有原来的内核缓冲区了，现在是内核缓冲区➕TLVDecoder内的缓冲区
+                 * 内核缓冲区只能按照TCP协议保证字节顺序不乱，字节不丢，至于这是不是一帧它并不知道，所以新创立一个decoder来存半帧的情况
+                 */
+
+                std::shared_ptr<Connection> conn;
                 {
                     std::lock_guard<std::mutex> lk(_mtx);
-                    if (_conns.find(fd) == _conns.end()) return;   // 回调里把我关了，别再 recv
+                    auto it = _conns.find(fd);
+                    if(it == _conns.end())return;
+                    conn = it->second;
                 }
-                continue;
+
+                conn->decoder().appendData(buf,static_cast<size_t>(n));
+
+                FrameHeader hdr;
+                std::string body;
+                
+                for(;;){
+                    auto st = conn->decoder().tryDecode(hdr,body);
+                    
+                    //出口1， 流不可信 关连接
+                    if(st == TLVDecoder::Status::BAD_ERROR){
+                        del_and_close(fd);
+                    }
+                    //出口2，没完整帧了 正常结束，等下一次EPOLLIN （主要都是在needmore中退出）
+                    if(st == TLVDecoder::Status::NEED_MORE )break;
+                    
+                    if(st == TLVDecoder::Status::OK){
+                        if(_frame_cb)_frame_cb(fd,hdr,body);
+                         {
+                            std::lock_guard<std::mutex> lk(_mtx);
+                            if (_conns.find(fd) == _conns.end()) return ;   // 回调里把我关了，别再 recv
+                        }
+                    }
+                    continue;
+                }
             }else if(n == 0){
                 del_and_close(fd);
                 return;
