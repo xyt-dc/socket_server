@@ -2,8 +2,19 @@ cmake_minimum_required(VERSION 3.16)
 
 project(socket LANGUAGES CXX)
 
-set(CMAKE_CXX_STANDARD 17)
+# ---------------------------------------------------------------------------
+# C++ 标准
+#
+# 为什么是 20：执行层异步化要用 <coroutine>（co_await / promise_type）。
+# 注意：协程不是「标准库给了就能用」，它需要编译器打开协程支持。
+# GCC 11+ 在 -std=c++20 下默认开启，但用 gnu++20 或显式 -fcoroutines 更稳。
+#
+# ★ 这里的 set() 会【覆盖】命令行 -DCMAKE_CXX_STANDARD=xx 的值，
+#   所以上面不能再让用户从外部指定 —— 想调整请改这一行。
+# ---------------------------------------------------------------------------
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS ON)   # 用 gnu++20：保留 POSIX 扩展（accept4/eventfd 声明更省事）
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 add_executable(socket_server
