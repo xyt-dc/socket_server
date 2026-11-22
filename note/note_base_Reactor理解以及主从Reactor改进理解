@@ -64,4 +64,214 @@ while (true) {
 2. Sub Reactor（大堂经理）：只负责把网络字节读出来、走你的 TLVDecoder 切出包，然后把菜单往传菜窗口一扔（丢进任务队列，耗时 0.001 毫秒），立刻转身去处理 i = 1 的李四。
 3. Worker 线程池（后厨厨师）：专门开 16 个甚至 32 个线程去调 db.Query()。哪怕张三的 SQL 查了 1 秒，也只是卡住了 1 个厨师线程，大堂经理（Sub Reactor）和其他 15 个厨师依然在飞速运转，全服其他人的收发和建连完全不受任何影响。
 (补充冷知识：你可能会问，那像 Redis 或 Node.js 也是单线程 Reactor，为什么它们不怕卡死？因为 Redis 是纯内存操作，每条指令只要几微秒，根本不查磁盘数据库；而 Node.js 底层也是偷偷开了一个 libuv 线程池，把所有查库、读文件的阻塞操作全扔给后台线程池去做了，本质上和上面的模式一模一样。)
+
+---
+
+# 三、本项目 EpollServer 到底哪里不行、为什么要再写 OLPT_Server（2026-11-22）
+
+对应代码：`src/mthread/Epoll_server.hpp`（现役）、`src/mthread/OLPT_server.hpp`（新写）
+
+## 3.1 先记住一句话
+
+> 当前 `EpollServer` = **1 个 reactor + N 个业务 worker**
+> 新写的 `OLPT_Server` = **1 个 main reactor + N 个 sub reactor + 0 个业务池**
+>
+> 前者的病是 **I/O 只有 1 个线程**；后者的病是 **业务跑在 I/O 线程上**。
+> 两者都不是终态，终态是 **N 个 sub reactor + 每个 sub 挂自己的业务池**。
+
+## 3.2 EpollServer 的问题清单（对着代码行看）
+
+### A 类：架构级 —— 改代码救不了，必须换结构
+
+**A1. I/O 只有 1 个线程（最根本的病）**
+
+`run_loop()` 是唯一执行 `epoll_wait` 的循环，而 `handle_accept / handle_read / handle_write / flush / decoder.tryDecode / epoll_ctl` **全部跑在这一个线程里**。
+容器 4 个核，你只用了 1 个核做 I/O，`workers` 再多也只是加业务线程，I/O 并行度恒等于 1。
+
+`kReadQuota = 64 * 1024` 只是让 reactor「愿意让路」，它**不扩大容量**：
+4 条连接同时灌数据，总 I/O 时间仍然是 4 份之和。
+
+**A2. `_conns` 一把全局锁扛所有事**
+
+```cpp
+std::unordered_map<int, std::shared_ptr<Connection>> _conns;
+std::mutex _mtx;                 // 整个服务器唯一的一把锁
+```
+
+用到它的地方：
+- `handle_read` 的 `while` 循环里，**每 recv 一次加锁一次**（`KReadBuf=4096`、配额 64KB → 单次事件最多加锁 16 次）
+- `send_wbuf` 每次加锁
+- `flush` 每次加锁
+- `del_and_close` 加锁
+- `handle_wakeup` 里 N 条回包 → N 次加锁
+
+一次 echo 至少 3 次加锁。这就是**单锁设计墙**：核越多抢得越凶，加机器反而不线性。
+
+**A3. 跨线程回写队列 `_wq` 没有上限**
+
+```cpp
+std::vector<PendingWrite> _wq;   // 只有 _wq_mtx，没有容量限制
+```
+
+`_queue_cap` 只约束 worker 的任务队列（`dispatch_frame` 里的 `submit`），**完全不约束 `_wq`**。
+worker 批量回包、reactor 来不及 flush 时，`_wq` 无上限增长，而每个元素还持有一份完整 `std::string` payload 拷贝 —— 慢客户端打爆内存的起点。
+
+**A4. 没有定时器，`--idle-timeout` 是空壳**
+
+`kWaitTimeOut = 100` 是写死的轮询超时，`TcpServerBase` 里没有 `set_idle_timeout` 的实现（`bench_server` 里那条 `try_set_idle_timeout` 能力探测就是为此留的）。
+没有时间轮/小根堆 ⇒ **收不了空闲连接**（slowloris 能一条条耗光 fd），也做不了「连接数上限 + LRU 淘汰」。
+而这些的前提是有一个能调度定时任务的 EventLoop（muduo 的 `runAfter / cancel` 挂在 loop 上），当前 `run_loop` 只有 `epoll_wait` + 分发，没有「延时任务队列」这个概念。
+
+### B 类：实现级 —— 能改，但改完还是 A 类
+
+**B1. 一次 echo 拷 5～6 次**
+
+```
+内核 rbuf --recv--> buf(4096 栈)
+        --decoder.appendData--> 拷贝①
+tryDecode --body(std::string)--> 拷贝②
+lambda 值捕获 hdr, body      --> 拷贝③
+_frame_cb --Msg_Handle_Echo--> 拷贝④
+pack()   --pkt-->              拷贝⑤
+srv->send --_wq PendingWrite{...,std::string}--> 拷贝⑥
+flush    --::send-->
+```
+
+**B2. `handle_read` 的锁可以移出循环**
+
+```cpp
+while(budget > 0){
+    ssize_t n = ::recv(fd, buf, sizeof(buf), 0);
+    if (n > 0) {
+        { std::lock_guard<std::mutex> lk(_mtx);   // ← 每轮都锁
+          auto it = _conns.find(fd); ... }
+```
+
+进循环前查一次 `conn` 就够：reactor 自己不会在循环里删连接。
+
+**B3. 背压处理极粗暴**
+
+```cpp
+if(_pools[shard]->submit(std::move(task))) return true;
+del_and_close(fd);      // 队列满 = 直接断连
+return false;
+```
+
+muduo 的做法是 **暂停 EPOLLIN**（`disableReading`），等队列空了再 `enableReading`。
+当前直接断连 —— E2/E3 里的 p95 抖动，有一部分就是这来的。
+
+**B4. wbuf 没有高水位线**
+
+`append_wbuf` 无容量上限。慢客户端 + 大 body ⇒ wbuf 无限涨。
+muduo 有 `HighWaterMarkCallback`（默认 64MB），超了通知业务限流/断连。
+
+**B5. send 逻辑写了两遍**
+
+`flush()` 里一套 `while send / EAGAIN → append_wbuf + mod(EPOLLIN|EPOLLOUT)`，`handle_write()` 里又一套几乎一样的。
+并且 `handle_write` **少了 `it->second == conn_ptr` 的 fd 复用校验**，两份逻辑已经开始分叉。
+
+**B6. 缺 `EPOLLRDHUP`**
+
+只处理了 `EPOLLHUP`（对端**完全**关闭）。对端 `shutdown(SHUT_WR)` 是半关闭，`EPOLLHUP` 不触发，只能靠 `recv` 返回 0 慢一拍才发现。
+
+**B7. backlog 128 + accept 无配额**
+
+`listen(fd, 128)` 偏小；`handle_accept` 的 `for(;;)` 也没上限，建连突发（SYN flood 式）会把 reactor 卡在 accept 循环里。
+
+**B8. `fd % N` 分片在热点连接下退化**
+
+按 fd 取模保证「同连接有序」，但一条超热连接（大文件下载）只会压满 1 个 worker，其余 3 个空转。
+这是按连接分片的固有权衡，muduo 也一样。
+
+### C 类：完全缺失（阶段 3/4/7 的活）
+
+`TCP_NODELAY`、`SO_KEEPALIVE`、`TCP_DEFER_ACCEPT`、`SO_REUSEPORT`、定时器、优雅关闭（`shutdown(WR)` + 等 wbuf 发完再 close）。
+
+## 3.3 那为什么还要写 OLPT_Server
+
+**不是为了替代 epoll，而是为了补「I/O 线程数」这一条。**
+
+### 理由 1：直接对症 A1 + A2
+
+```
+EpollServer（现在）                     OLPT_Server（新写）
+┌─────────────────────┐                ┌──────────┐
+│ reactor (1 线程)     │                │  Main    │  accept only
+│  epoll_wait          │                │ Reactor  │
+│  recv / send  ← 都在这│                └────┬─────┘
+│  tryDecode           │                     │ dispatch(cfd) round-robin
+│  ┌────┬────┬────┐    │        ┌───────┬────┴──┬───────┐
+│  │pool│pool│pool│    │        ▼       ▼       ▼       ▼
+│  │ 1  │ 1  │ 1  │    │      Sub0    Sub1    Sub2    Sub3
+│  └────┴────┴────┘    │      自己的 _epoll / _conns，无锁
+│  ↑ _mtx 全局锁        │      业务就跑在自己的 I/O 线程里
+└─────────────────────┘
+```
+
+- I/O 并行度：**1 核 → N 核**
+- 每个 `SubReactor` 独占自己的 `_conns`，`run_in_loop` 保证所有 `epoll_ctl` 只在自己线程执行 ⇒ **不需要 `_mtx`、不需要 `_wq` + `eventfd`**（`send_wbuf` 只需 `sub->run_in_loop(...)`）
+- 白送 `run_in_loop / queueInLoop` 这套抽象 —— 后续加定时器就有地方挂了
+
+### 理由 2：它是阶段 4（多 reactor + SO_REUSEPORT）的地基
+
+`SubReactor` = 独立 eventloop + 独立连接表 + 跨线程任务投递，这三件就是 `SO_REUSEPORT` 多进程/多线程方案的全部前置。
+
+### 理由 3：它能**量化暴露** epoll 的病（最关键）
+
+纯 echo 压测下两者数字几乎一模一样：
+
+| 场景 | epoll | olpt |
+|---|---|---|
+| latency 200 连接 p50 | 20.87 ms | 20.59 ms |
+| throughput 20×300×4096B | 17466 msg/s | 19680 msg/s |
+| hold 500 | threads=5 | threads=5 |
+
+因为 echo 业务是**微秒级**的，I/O 线程数的差别被完全淹没。
+只有 E4（`--biz-delay=2000` + `workers=1`，一条连接发慢请求、另一条同时灌 32MB）才拉出：
+
+```
+epoll  0.18 s
+olpt   2.18 s   ← ≈ 慢请求的 2000 ms，说明该 shard 的 I/O 完全停摆
+```
+
+**这 2 秒就是 OLPT 的固有代价：业务跑在 I/O 线程上，`sleep_for` 期间这个 shard 的 `epoll_wait` 一起停摆。**
+
+### 反过来：OLPT 自带的问题
+
+| 问题 | 说明 |
+|---|---|
+| 业务与 I/O 同线程 | 一条慢查询能堵死整个 shard（E4 实证） |
+| 没有业务池 | 长任务没法隔离出去 |
+| 分片不均 | 热点连接只能压一个 sub reactor |
+| `run_in_loop` 有拷贝开销 | 跨线程 send 要 `std::function` 堆分配 + `std::string` 值捕获 |
+| 定时器仍然缺失 | 同阶段 3 待办 |
+
+## 3.4 结论：两条路都不完整，应该合起来
+
+```
+epoll  = 1 reactor + 业务池     → I/O 上不了多核
+olpt   = N reactor + 无业务池   → I/O 多核了，但业务把 I/O 卡死
+```
+
+muduo / nginx 的做法是**同时用**：
+
+```
+MainReactor (accept)
+   │
+   ├─ SubReactor0 (epoll_wait，只做 I/O) + IoThreadPool(1)  ← 业务在这里
+   ├─ SubReactor1 (epoll_wait，只做 I/O) + IoThreadPool(1)
+   ├─ SubReactor2 ...
+   └─ SubReactor3 ...
+```
+
+每个 sub reactor 把 `_frame_cb` 丢给自己的单线程池（单线程 + FIFO ⇒ 同连接回包天然有序，等于现在的 `fd % N` 分片），慢业务只阻塞该 shard 的**业务**，不阻塞该 shard 的 `recv / accept / epoll_wait`。
+E4 的 olpt 会从 **2.18s → ~0.2s**（即现在 epoll 的水平），但**同时拿到了 N 核 I/O**。
+
+## 3.5 下一步优先级（按投入产出比）
+
+1. **给 `SubReactor` 挂 `IoThreadPool(1)`**（~30 行）→ 直接验证 E4 从 2.18s 掉到 0.2s。这是阶段 4 的核心。
+2. **`_wq` 加上限 + `append_wbuf` 加高水位线**（~20 行）→ 堵住内存无上限增长。
+3. **`_conns` 锁粒度优化**（`handle_read` 里把加锁移出 while）→ 解决 A2 的一半。
+4. **把 `tryDecode` 从 reactor 移到业务线程** → reactor 只做 `recv` + 追加 `conn->rbuf`，解帧在 worker 做，临界区再缩一截。这就是 muduo 里 `Buffer` 与 `onMessage` 的边界。
+5. 定时器 → 等 `run_in_loop` 就位后再加小根堆。
 理解了这个阻塞点之后，你在写自己的服务端时，有没有打算把耗时的业务逻辑拆到独立的线程池里？如果你需要，我可以给你演示一下 Sub Reactor 线程和 Worker 线程池之间是如何通过“无锁/加锁任务队列 + eventfd”安全传递数据包并触发回包发送的。
