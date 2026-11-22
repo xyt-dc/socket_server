@@ -52,41 +52,177 @@ python3 test/net/block_compare.py --no-build
 
 ```mermaid
 classDiagram
+    direction TB
+
     class TcpServerBase {
         <<abstract>>
         #int _listen_fd
+        #int _port
+        #atomic _running
+        #int _idle_fd
         #FrameCallback _frame_cb
+        #MessageCallback _msg_cb
         +start()
         +stop()
         +send()
         +set_frame_callback()
+        +set_idle_timeout()
+        #create_socket()
+        #set_reuse_addr()
+        #do_bind()
+        #do_listen()
+        #accept_once()
         #run_loop()*
         #send_wbuf()
     }
-    class BaseEchoServer
-    class ThreadPerConnServer
-    class ThreadPool_server
+
+    class BaseEchoServer {
+        #run_loop()
+        -serve_one()
+    }
+
+    note for BaseEchoServer "无成员变量：状态全在 serve_one 的栈上"
+
+    class ThreadPerConnServer {
+        #run_loop()
+        #classify_accept()
+        -client_thread_func()
+    }
+
+    note for ThreadPerConnServer "无成员变量：TLVDecoder 在每条连接线程的栈上"
+
+    class ThreadPool_server {
+        -set _clients
+        -mutex _mtx
+        -atomic _reject_count
+        -IoThreadPool _Pool
+        +cleanup_clients()
+        #run_loop()
+        #classify_accept()
+        -handle_client_read()
+    }
+
     class EpollServer {
-        -Epoll _epoll
-        -vector _pools
-        -int _wake_fd
-        +handle_write()
-        +handle_wakeup()
-    }
-    class OLPT_Server {
-        -Epoll _epoll
-        -vector _subs
-        -size_t _next
-        +dispatch()
-    }
-    class SubReactor {
-        -Epoll _epoll
+        -unique_ptr _epoll
+        -vector event_poll
         -map _conns
-        -IoThreadPool _pool
+        -mutex _mtx
+        -vector _pools
+        -size_t _workers
+        -size_t _queue_cap
         -int _wake_fd
-        +run_in_loop()
-        +adopt()
+        -vector _wq
+        -mutex _wq_mtx
+        -threadid _reactor_tid
+        +send_wbuf()
+        #run_loop()
+        -flush()
+        -epoll_init()
+        -handle_accept()
+        -handle_read()
+        -handle_write()
+        -handle_wakeup()
+        -wakeup()
+        -dispatch_frame()
+        -del_and_close()
+        -shutdown_pools()
+    }
+
+    class OLPT_Server {
+        -size_t _n_sub
+        -size_t _next
+        -size_t _pool_threads
+        -size_t _queue_cap
+        -unique_ptr _epoll
+        -vector _subs
+        -mutex _own_mtx
+        -map _owner
+        +sub_count()
+        #send_wbuf()
+        #run_loop()
+        -init_listen_nonblock()
+        -start_subs()
+        -handle_accept()
+        -dispatch()
+    }
+
+    class SubReactor {
+        -size_t _id
+        -FrameCallback _frame_cb
+        -function _on_open
+        -function _on_close
+        -unique_ptr _epoll
+        -int _wake_fd
+        -map _conns
+        -unique_ptr _pool
+        -mutex _q_mtx
+        -vector _q
+        -thread _th
+        -atomic _running
+        +id()
+        +start()
+        +stop()
         +send()
+        +adopt()
+        +run_in_loop()
+        +is_current_thread()
+        -loop()
+        -handle_read()
+        -handle_write()
+        -dispatch_frame()
+        -flush()
+        -close_conn()
+        -wakeup()
+        -handle_wakeup()
+        -do_pending()
+    }
+
+    class Epoll {
+        -int _epoll_fd
+        -int _max_events
+        +add()
+        +mod()
+        +del()
+        +wait()
+    }
+
+    class Connection {
+        -int _fd
+        -size_t _woff
+        -string _wbuf
+        -TLVDecoder _decoder
+        -timepoint _last_active
+        -mutex _wmtx
+        +fd()
+        +closed()
+        +decoder()
+        +append_wbuf()
+        +wbuf_retrieve()
+        +wbuf_data()
+        +wbuf_size()
+        +shutdown_rdwr()
+        -touch()
+        -last_active()
+    }
+
+    class IoThreadPool {
+        -vector _workers
+        -BlockingQueue _tasks
+        -once_flag _once
+        +submit()
+        +shutdown()
+        +try_run_one()
+        +worker_count()
+        +queue_size()
+        -worker_loop()
+    }
+
+    class TLVDecoder {
+        -string _buffer
+        +appendData()
+        +tryDecode()
+        +pending()
+        +reset()
     }
 
     TcpServerBase <|-- BaseEchoServer
@@ -94,20 +230,34 @@ classDiagram
     TcpServerBase <|-- ThreadPool_server
     TcpServerBase <|-- EpollServer
     TcpServerBase <|-- OLPT_Server
+
     OLPT_Server "1" *-- "N" SubReactor
+    ThreadPool_server "1" *-- "1" IoThreadPool
+    EpollServer "1" *-- "1..W" IoThreadPool
+    SubReactor "1" *-- "0..1" IoThreadPool
+    EpollServer "1" *-- "1" Epoll
+    EpollServer "1" *-- "0..N" Connection
+    OLPT_Server "1" *-- "1" Epoll
+    SubReactor "1" *-- "1" Epoll
+    SubReactor "1" *-- "0..N" Connection
+    Connection "1" *-- "1" TLVDecoder
 ```
 
-| 模型 | 实现类 | 运行时线程结构 |
-|---|---|---|
-| `base` | `BaseEchoServer`（在 `test/net/`） | 1，串行，同时只服务 1 条连接 |
-| `thread` | `ThreadPerConnServer` | 1 + N 连接 |
-| `pool` | `ThreadPool_server` | 1 accept + W worker，阻塞 `recv` 焊死 worker |
-| `epoll` | `EpollServer` | 1 reactor + W worker，按 `fd % W` 分片，worker 经 eventfd 回写 |
-| `olpt` | `OLPT_Server` | 1 主（accept + 轮询分发）+ N 从，每从可挂 P 个业务线程 |
+| 模型 | 实现类 | 自有状态 | 运行时线程结构 |
+|---|---|---|---|
+| `base` | `BaseEchoServer`（`test/net/`） | **无** | 1，串行，同时只服务 1 条连接 |
+| `thread` | `ThreadPerConnServer` | **无** | 1 + N 连接，每个 `detach` 线程栈上持一个 `TLVDecoder` |
+| `pool` | `ThreadPool_server` | 连接集合 + 池 | 1 accept + W worker，阻塞 `recv` 焊死 worker |
+| `epoll` | `EpollServer` | 连接表 + 分片池 + 回写队列 | 1 reactor + W worker，按 `fd % W` 分片，worker 经 eventfd 回写 |
+| `olpt` | `OLPT_Server` | N 个 `SubReactor` + fd 归属表 | 1 主（accept + 轮询分发）+ N 从，每从可挂 P 个业务线程 |
 
-`Epoll` / `Connection` / `IoThreadPool` / `TLVDecoder` 是四个派生类共用的零件，
-差异只在 `run_loop()` 和写路径。`base` 不过帧协议，直接走 `_msg_cb` 裸字节回调——
-它单独放在 `test/net/`，因为它是**对照组**而不是候选方案。
+`base` 和 `thread` 没有成员变量不是图画漏了——它们的全部状态都在函数栈上
+（`base` 的 `serve_one` 里一个 `buf`，`thread` 的 `client_thread_func` 里一个
+`unique_ptr<TLVDecoder>`）。**这正是它们的问题**：状态不落在对象上，就没法做超时扫描、
+没法把连接交给别的线程。
+
+`Epoll` / `Connection` / `TLVDecoder` 是所有走帧协议的模型共用的零件，
+差异只在 `run_loop()` 和写路径。`base` 不过帧协议，直接走 `_msg_cb` 裸字节回调。
 
 ```
 lib/     blocking_queue  Iothread_pool  thread_pool  jthread  Connection
