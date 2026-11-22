@@ -47,42 +47,74 @@ python3 test/net/block_compare.py --no-build
 
 ## 架构
 
-`TcpServerBase::start()` 把 `socket → SO_REUSEADDR → bind → listen` 写死，
-**唯一的接缝是纯虚 `run_loop()`**：
+`TcpServerBase` 把 `socket → SO_REUSEADDR → bind → listen` 写死，只留两个接缝：
+纯虚 `run_loop()` 决定并发模型，虚 `send_wbuf()` 决定写路径语义。
 
 ```mermaid
 classDiagram
     class TcpServerBase {
         <<abstract>>
-        +start() socket/bind/listen
-        #run_loop()*
+        #int _listen_fd
         #FrameCallback _frame_cb
+        +start()
+        +stop()
+        +send()
+        +set_frame_callback()
+        #run_loop()*
+        #send_wbuf()
     }
+    class BaseEchoServer
     class ThreadPerConnServer
     class ThreadPool_server
-    class EpollServer
+    class EpollServer {
+        -Epoll _epoll
+        -vector _pools
+        -int _wake_fd
+        +handle_write()
+        +handle_wakeup()
+    }
     class OLPT_Server {
-        1 主 Reactor + N 从 Reactor
+        -Epoll _epoll
+        -vector _subs
+        -size_t _next
+        +dispatch()
     }
     class SubReactor {
-        1 线程 + 1 epoll + 1 张 conns 表
-        +run_in_loop(task) 唯一跨线程入口
+        -Epoll _epoll
+        -map _conns
         -IoThreadPool _pool
+        -int _wake_fd
+        +run_in_loop()
+        +adopt()
+        +send()
     }
 
+    TcpServerBase <|-- BaseEchoServer
     TcpServerBase <|-- ThreadPerConnServer
     TcpServerBase <|-- ThreadPool_server
     TcpServerBase <|-- EpollServer
     TcpServerBase <|-- OLPT_Server
-    OLPT_Server *-- SubReactor
+    OLPT_Server "1" *-- "N" SubReactor
 ```
+
+| 模型 | 实现类 | 运行时线程结构 |
+|---|---|---|
+| `base` | `BaseEchoServer`（在 `test/net/`） | 1，串行，同时只服务 1 条连接 |
+| `thread` | `ThreadPerConnServer` | 1 + N 连接 |
+| `pool` | `ThreadPool_server` | 1 accept + W worker，阻塞 `recv` 焊死 worker |
+| `epoll` | `EpollServer` | 1 reactor + W worker，按 `fd % W` 分片，worker 经 eventfd 回写 |
+| `olpt` | `OLPT_Server` | 1 主（accept + 轮询分发）+ N 从，每从可挂 P 个业务线程 |
+
+`Epoll` / `Connection` / `IoThreadPool` / `TLVDecoder` 是四个派生类共用的零件，
+差异只在 `run_loop()` 和写路径。`base` 不过帧协议，直接走 `_msg_cb` 裸字节回调——
+它单独放在 `test/net/`，因为它是**对照组**而不是候选方案。
 
 ```
 lib/     blocking_queue  Iothread_pool  thread_pool  jthread  Connection
          epoll(RAII)  frame(24B TLV + adler32 + TLVDecoder)
 src/     server/tcp_server     模板方法基类
          protocol/tlv_defs      Cmd 枚举 + Msg_Handle_Echo
-         mthread/               五种并发模型各一个文件
+         mthread/               四种并发模型各一个文件（base 在 test/net/）
 test/    unit/ 纯内存断言   tlv/ Python 协议参考实现
          suites/ 01–06 端到端   net/ 压测与测量工具
 note/    stage1–6 踩坑全记录 + Reactor / 定时器专题
@@ -138,8 +170,8 @@ note/    stage1–6 踩坑全记录 + Reactor / 定时器专题
 | `ERROR`（checksum 错） | **只丢这一帧，继续解析** | `len` 是好的，边界仍可信 |
 | `BAD_ERROR`（magic/len 非法） | **清空缓冲区 + 断连** | 连下一帧从哪开始都不知道 |
 
-> 最初三个服务端都写成 `if (NEED_MORE || ERROR) break;` —— 库设计的"只丢一帧"被调用方架空，
-> 一个坏帧能带走后面所有好帧。同一个 bug 要改三个文件，这也正是 `tlv_codec.hpp` 要解决的。
+> 最初四个服务端都写成 `if (NEED_MORE || ERROR) break;` —— 库设计的"只丢一帧"被调用方架空，
+> 一个坏帧能带走后面所有好帧。同一个 bug 要改四个文件，这也正是 `tlv_codec.hpp` 要解决的。
 
 ---
 
@@ -174,7 +206,7 @@ for s in test/suites/0*.sh; do "$s"; done       # 全跑
 |---|---|---|
 | 1 | `wbuf` 无上限，慢客户端不读 → 内存无限涨（64 MB 大包时 RSS 峰值 83 MB，其中 64 MB 就是 wbuf） | 🟠 |
 | 2 | 无连接数上限、无空闲超时 → slowloris 可耗尽 fd（`06_timer.sh` 就是为此写的） | 🟠 |
-| 3 | 三个服务端各写一份 decod 循环，协议任何修正要改三处 | 🟠 |
+| 3 | `pthread` / `thread_pool` / `Epoll` / `SubReactor` 四处各写一份兄弟的 decod 循环，协议任何修正要改四处 | 🟠 |
 | 4 | `_listen_fd` 非原子，`stop()` 与析构可能双重 `close` | 🟠 |
 | 5 | `Connection::wbuf_retrieve` 用 `erase(0,len)`，大包频繁部分写是 O(n²) | 🟡 |
 | 6 | `factory.hpp` 为空 → 业务硬编码 `if (cmd == EchoReq)`，第二个业务进来就要重构 | 🟡 |
