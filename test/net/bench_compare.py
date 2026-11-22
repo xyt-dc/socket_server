@@ -190,6 +190,10 @@ def run_client(port, sc, timeout, srv, sample_interval=0.1):
     ]
     if sc["mode"] == "hold":
         cmd.append(f"--hold={sc['hold']}")
+    # base 走 set_message_callback 吃裸字节；其余三个模型一律过 TLVDecoder，
+    # 不加 --tlv 就会被判 BAD_ERROR 断连，外部只表现为超时 —— 对比表直接全红。
+    if srv.model != "base":
+        cmd.append("--tlv")
     cmd.append("--json")
 
     peak_threads = 0
