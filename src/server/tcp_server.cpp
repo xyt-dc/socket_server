@@ -36,14 +36,21 @@ void TcpServerBase::do_bind(){
     server_addr.sin_port = htons(_port);
     server_addr.sin_addr.s_addr = htonl(INADDR_ANY);
     int res = bind(_listen_fd,(const struct sockaddr*) &server_addr,sizeof(server_addr));
-    if (res <0)
+    if (res <0){
         std::cout<<"bind failed"<<std::endl;
+        std::exit(1);
+    }
+        
 }
 
 void TcpServerBase::do_listen(){
     int listen_res = listen(_listen_fd, 128);
-    if (listen_res < 0)
-        std::cout<<"listen_failed"<<std::endl; 
+    // ★ 花括号不能省：漏了大括号的话 std::exit(1) 会无条件执行，
+    //   表现成"bind 成功、listen 成功，但进程启动即退出"。
+    if (listen_res < 0){
+        std::cout<<"listen_failed"<<std::endl;
+        std::exit(1);
+    }
 }
 
 int TcpServerBase::accept_once(struct sockaddr_in &server_addr){

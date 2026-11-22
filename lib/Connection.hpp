@@ -8,19 +8,20 @@
 
 #include <iostream>
 #include <thread>
+#include <mutex>          // std::mutex / std::lock_guard（原先靠外部包含顺序，单独 include 本文件就报错）
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <unistd.h>
 #include "frame.hpp"
+#include <chrono>
+
 
 
 class Connection{
 public:
-    explicit Connection(int fd) noexcept:_fd(fd){}
+    explicit Connection(int fd) noexcept:_fd(fd),_last_active(std::chrono::steady_clock::now()){}
     ~Connection(){
-        if(_fd >= 0){
-            ::close(_fd);
-        }
+        closed_fd();
     }
 
     /**
@@ -112,9 +113,30 @@ public:
             ::shutdown(_fd,SHUT_RDWR);
         }
     }
+
+    bool closed() const noexcept{
+        std::lock_guard<std::mutex> lk (_wmtx);
+        return _fd < 0;
+    }
+
+    void closed_fd() noexcept{
+        std::lock_guard<std::mutex> lk(_wmtx);
+        if(_fd >= 0){::close(_fd);_fd = -1;}
+    }
+
+    std::mutex& wmtx() const {return _wmtx;}
+
 private:
     int _fd;
     size_t _woff;
     std::string _wbuf;
     TLVDecoder _decoder;
+    std::chrono::steady_clock::time_point _last_active;
+    void touch() noexcept{
+        _last_active = std::chrono::steady_clock::now();
+    }
+    std::chrono::steady_clock::time_point last_active() const noexcept{
+        return _last_active;
+    }
+    mutable std::mutex _wmtx;
 };

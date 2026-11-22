@@ -8,6 +8,7 @@
 #include <functional>
 #include <unistd.h>
 #include "frame.hpp"
+#include <chrono>
 
 class TcpServerBase{
 public:
@@ -46,6 +47,10 @@ public:
 
     void set_frame_callback(FrameCallback cb){
         _frame_cb = std::move(cb);
+    }
+
+    virtual void set_idle_timeout(std::chrono::milliseconds ms){
+        _idle_ms = ms;
     }
 
     /**
@@ -114,6 +119,7 @@ protected:
         }
     }
 
+    
     //client 处理
     void handle_client_read(int client_fd);
 
@@ -125,6 +131,7 @@ protected:
 
     //预留fd
     int _idle_fd = -1;
+    std::chrono::milliseconds _idle_ms{30000};
 
 };
 

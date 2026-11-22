@@ -145,7 +145,7 @@ private:
             // 不能用 MSG_PEEK：只窥探不消费，同一份数据会被无限次读到 -> 死循环
             ssize_t n = recv(client_fd, buf, sizeof(buf), 0);
             if (n > 0) {
-                // if (_msg_cb) _msg_cb(client_fd, buf, static_cast<size_t>(n));
+                 //if (_msg_cb) _msg_cb(client_fd, buf, static_cast<size_t>(n));
                 decoder->appendData(buf,n);
                 for(;;){
                     auto st = decoder->tryDecode(hdr,body);
