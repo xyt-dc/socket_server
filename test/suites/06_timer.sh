@@ -168,6 +168,30 @@ info "服务端 = $BIN （model=$MODEL）"
 info "探针   = $PROBE"
 info "超时   = ${IDLE}s"
 
+# ---- [0/4] 算法层单元测试：纯内存，不碰 socket，不睡觉 ----
+# 分层原则：算法错了就不用往下测集成了，否则后面一堆 FAIL 都是同一个根因的噪音。
+# 这里用手写 g++ 而不是 CMake target，与 02_blocking_queue.sh 保持一致：
+# 单元测试要能脱离 cmake 单独跑（改一行、编一次、0.5 秒看结果）。
+TIMER_UNIT="$ROOT/test/unit/timer_test.cpp"
+if [ -f "$TIMER_UNIT" ]; then
+    info "编译定时器单元测试..."
+    if ! g++ -std=c++17 -Wall -Wextra -Werror \
+            -I "$ROOT/lib" -I "$ROOT/src/timer" \
+            "$TIMER_UNIT" -o "$TMPDIR_T/timer_unit" >"$TMPDIR_T/timer_unit_build.log" 2>&1; then
+        echo "  ✗ 定时器单元测试编译失败："
+        sed 's/^/      /' "$TMPDIR_T/timer_unit_build.log" | head -20
+        exit 2
+    fi
+    if ! "$TMPDIR_T/timer_unit" >"$TMPDIR_T/timer_unit_run.log" 2>&1; then
+        echo "  ✗ 定时器单元测试失败（算法层就不对，集成测试没有意义）："
+        grep -E 'FAIL|pass=' "$TMPDIR_T/timer_unit_run.log" | sed 's/^/      /' | head -20
+        exit 1
+    fi
+    pass "单元测试通过（$(grep -o 'pass=[0-9]*' "$TMPDIR_T/timer_unit_run.log" | head -1)）"
+else
+    info "跳过单元测试（$TIMER_UNIT 不存在）"
+fi
+
 # 服务端是否真的实现了空闲超时（还没实现时给出明确提示，而不是一串莫名 FAIL）
 # 不能只检查「参数被接受」：阶段 7.2 未实现时 bench_server 会主动返回 2，
 # 这是一种「大声失败」，脚本必须把它转成清晰的提示而不是继续往下跑。
