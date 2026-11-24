@@ -54,6 +54,22 @@ public:
     }
 
     /**
+     * @brief 空闲超时是否【真的会生效】
+     *
+     * ★ 缺陷 C：不能用「有没有 set_idle_timeout 方法」来探测能力。
+     *   基类从一开始就有这个方法（而且还会老实把值存进 _idle_ms），
+     *   所以「方法存在」这个探测恒为真 —— 服务端接受了参数、却什么都没做，
+     *   测试拿到的是「参数被接受」而不是「行为存在」，结果就是假绿。
+     *
+     * 正确的探测必须问「有没有东西在真的扫描超时」：
+     *   · thread / pool / base 这三种模型没有定时器 → false
+     *   · epoll  看 _scanner 是否创建
+     *   · olpt   看从 Reactor 是否都有扫描器
+     * 没接线的实现返回 false，脚本才能真的红。
+     */
+    virtual bool supports_idle_timeout() const noexcept{ return false; }
+
+    /**
      * @brief 发送门面（供业务回调 / 外部调用）
      *
      * 为什么需要它：派生类的 send_wbuf 语义差异很大（线程模型是阻塞 send，

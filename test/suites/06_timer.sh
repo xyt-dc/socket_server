@@ -16,12 +16,12 @@
 #     · 遍历 _conns 时 erase → 迭代器失效，偶发崩溃或漏删
 #   所以这一章必须正反两面都测：该杀的杀掉（die），不该杀的留住（alive）。
 #
-# 适用范围：只测 epoll（以及未来在这个基础上长出来的主从 reactor）
+# 适用范围：只测 epoll 与 olpt（主从 reactor）
 #   thread（one-per-conn）是基准实现，不做定时器。
 #   pool 是第三种服务器的过渡板，最终会被吸收进主从 reactor 的 worker 池，
 #   也不单独做定时器。
 #   两者共同点是 client fd 来自阻塞的 accept()，收尾要靠 shutdown 唤醒 worker；
-#   而 epoll / reactor 的 client fd 来自 accept4(SOCK_NONBLOCK)，
+#   而 epoll / olpt 的 client fd 来自 accept4(SOCK_NONBLOCK)，
 #   单线程内 del_and_close 就是全部动作，没有这种困扰。
 #
 # 四个阶段（按依赖顺序）
@@ -38,10 +38,9 @@
 #   ./test/suites/06_timer.sh              # 全量
 #   ./test/suites/06_timer.sh --no-build   # 跳过编译
 #   ./test/suites/06_timer.sh --keep       # 保留临时目录（看服务端日志）
-#   ./test/suites/06_timer.sh --server=reactor
+#   ./test/suites/06_timer.sh --server=olpt
 #                                          # 换被测模型（默 epoll）
-#                                          # 主从 reactor 落地后直接传它，
-#                                          # 本脚本其余部分无需改动
+#                                          # olpt = 主从 reactor，四阶段同样适用
 #
 # 退出码
 #   0 = 全部 PASS
@@ -476,7 +475,7 @@ if [ "$FAILED" -eq 0 ]; then
     echo "    · 混合：死连接被清的同时，活连接零丢包，进程不崩"
     echo "    · 边界：0.75× 间隔持续发，全部存活"
     echo
-    echo "  主从 reactor 落地时，这一章只需改一处："
+    echo "  主从 reactor（olpt）已落地，这一章的两模型共用同一套断言："
     echo "    每个 Sub Reactor 线程自己扫自己的 _conns（单线程内无需加锁），"
     echo "    Main 线程只负责 accept 并分发，不碰定时器。"
     echo "    这正是 'one loop per thread' 比全局扫描优越的地方："

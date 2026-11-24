@@ -101,9 +101,15 @@ public:
      *
      * ★ 用来消灭缺陷 C（假通过）：bench_server 以前只探测「有没有
      *   set_idle_timeout 这个方法」，而基类早就有了 → 探测永远为真。
-     *   现在改成探测这个，没接线就是 false，06_timer.sh 才能真的红。
+     *
+     * ★ 为什么是常量 true 而不是 `_scanner != nullptr`：
+     *   bench_server 的调用顺序是 set_idle_timeout() → supports_...() → start()，
+     *   而 _scanner 要到 run_loop 里才创建。用指针判空就会在【正确实现】上
+     *   返回 false —— 比原来的假绿更糟：真实现了反而报错退出。
+     *   这个函数的语义是「本模型有没有定时器扫描这回事」，不是「现在装好了没」，
+     *   所以 EpollServer 恒为 true；没实现定时器的模型继承基类默认的 false。
      */
-    bool supports_idle_timeout() const noexcept{ return _scanner != nullptr; }
+    bool supports_idle_timeout() const noexcept{ return true; }
 
     void send_wbuf (int __fd,const void* __data,size_t __n)override{
         if(__fd < 0 || __data == nullptr || __n == 0) return;

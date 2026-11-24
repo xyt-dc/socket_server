@@ -52,34 +52,17 @@ namespace {
 TcpServerBase* g_server = nullptr;
 
 // ---------------------------------------------------------------- 能力探测
-// 阶段 7.2 之前 TcpServerBase 没有 set_idle_timeout，
-// 直接调用会编译失败，那样连 --help 都跑不了。
-// 用 SFINAE 探测「成员是否存在」，未实现时走 else 分支大声报错。
-namespace detail {
-
-template <class T, class = void>
-struct has_set_idle_timeout : std::false_type {};
-
-template <class T>
-struct has_set_idle_timeout<T, std::void_t<decltype(
-    std::declval<T&>().set_idle_timeout(std::chrono::milliseconds{0}))
->> : std::true_type {};
-
-// 无法用 if constexpr 在非模板上下文里保护「不存在的成员」：
-// 被丢弃的分支仍然要求语义正确。所以真正调用必须放在函数模板里，
-// 由重载决议在编译期挑一个。
-template <class T>
-bool try_set_idle_timeout(T& srv, std::chrono::milliseconds ms) {
-    if constexpr (has_set_idle_timeout<T>::value) {
-        srv.set_idle_timeout(ms);
-        return true;
-    } else {
-        (void)srv; (void)ms;
-        return false;
-    }
-}
-
-} // namespace detail
+//
+// ★ 缺陷 C 的教训：这里以前用 SFINAE 探测「有没有 set_idle_timeout 方法」。
+//   而基类【一直都有】这个方法（而且会老老实实把值存进 _idle_ms），
+//   所以那个探测恒为真 —— 服务端接受了 --idle-timeout、却什么都没做，
+//   06_timer.sh 拿到的是「参数被接受」而不是「行为存在」→ 假绿。
+//
+//   现在改成问「有没有东西在真的扫描超时」，即 TcpServerBase::
+//   supports_idle_timeout() 这个虚函数。没接线的模型（base/thread/pool）
+//   继承到 false，脚本才能真的红。
+//
+//   同时也就不再需要 SFINAE 那套模板技巧了 —— 探测变成运行时一次虚调用。
 
 // 信号上下文只做两件异步信号安全的事：置标志 + close(listen_fd)
 void on_signal(int) {
@@ -196,16 +179,21 @@ int main(int argc, char** argv) {
     //     void TcpServerBase::set_idle_timeout(std::chrono::milliseconds ms);
     //                                              ^ 毫秒，0 = 关闭
     if (idle_given) {
-        if (detail::try_set_idle_timeout(*server, std::chrono::milliseconds(idle_s * 1000))) {
+        // ★ 先真的设上去（基类保证合法型号都不会崩），再问「会不会生效」。
+        //   顺序不能反：如果先探测，未接线的模型也会被探测一次，
+        //   而且“设上去但报错退出”的语义会变得含混。
+        server->set_idle_timeout(std::chrono::milliseconds(idle_s * 1000));
+
+        if (server->supports_idle_timeout()) {
             if (verbose) {
                 std::cout << "[idle] timeout = " << idle_s << "s"
                           << (idle_s == 0 ? " (disabled)" : "") << std::endl;
             }
         } else {
             std::cerr
-                << "--idle-timeout is not implemented yet.\n"
-                << "  TcpServerBase 还没有 set_idle_timeout(std::chrono::milliseconds)。\n"
-                << "  这正是阶段 7.2 要做的事，实现前 test/suites/06_timer.sh 应当失败。\n";
+                << "--idle-timeout is not effective for server model '" << model << "'.\n"
+                << "  只有 epoll / olpt 接了定时器扫描；base / thread / pool 没有。\n"
+                << "  拒绝静默接受参数再假装没事 —— 那会让 06_timer.sh 假绿。\n";
             return 2;
         }
     }
