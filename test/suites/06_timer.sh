@@ -132,6 +132,12 @@ stop_server() {
 }
 
 # 从 JSON 里抠字段，抠不到返回 -1
+#
+# ★ 布尔必须归一成 1 / 0：
+#   idle_probe.py 输出的是 json.dumps({"ok": True})，
+#   Python 的 str(True) 是 "True"，脚本里 [ "$OK" = "1" ] 永远不成立。
+#   这个 bug 在「功能没实现」时完全看不出来（那时候 ok 本来就是 false），
+#   一实现就变成「测试全红但其实是好的」—— 比真 bug 更浪费时间。
 jget() {  # $1=输出文本  $2=字段名
     printf '%s' "$1" | python3 -c '
 import sys, json, re
@@ -140,7 +146,11 @@ m = re.search(r"\{.*\}", s, re.S)
 if not m:
     print(-1); raise SystemExit
 try:
-    print(json.loads(m.group(0)).get(sys.argv[1], -1))
+    v = json.loads(m.group(0)).get(sys.argv[1], -1)
+    if isinstance(v, bool):
+        print(1 if v else 0)
+    else:
+        print(v)
 except Exception:
     print(-1)
 ' "$2" 2>/dev/null || echo -1
@@ -192,38 +202,75 @@ else
     info "跳过单元测试（$TIMER_UNIT 不存在）"
 fi
 
-# 服务端是否真的实现了空闲超时（还没实现时给出明确提示，而不是一串莫名 FAIL）
-# 不能只检查「参数被接受」：阶段 7.2 未实现时 bench_server 会主动返回 2，
-# 这是一种「大声失败」，脚本必须把它转成清晰的提示而不是继续往下跑。
-if ! "$BIN" --port=1 --idle-timeout=1 >"$TMPDIR_T/probe_arg.log" 2>&1; then
-    if grep -qi 'not implemented\|unknown arg' "$TMPDIR_T/probe_arg.log"; then
-        echo
-        echo "  ✗ 服务端还没有实现空闲超时（阶段 7.2）。"
-        echo
-        echo "  需要做两件事："
-        echo
-        echo "  ① 在 src/ 侧加接口（签名必须与 bench_server 的探测一致）："
-        echo "       // server/tcp_server.hpp  —— TcpServerBase"
-        echo "       virtual void set_idle_timeout(std::chrono::milliseconds ms) {"
-        echo "           _idle_ms = ms;   // 0 = 关闭"
-        echo "       }"
-        echo "       protected: std::chrono::milliseconds _idle_ms{30000};"
-        echo
-        echo "  ② 在 Epoll_server 里真正用起来："
-        echo "       · Connection 加 steady_clock::time_point _last_active（构造时 now()）"
-        echo "       · recv>0 和 send 成功两处 touch()"
-        echo "       · run_loop 的 dispatch 之后调 evict_idle()"
-        echo "       · evict_idle：持锁收集过期 fd → 放锁 → 逐个 del_and_close"
-        echo
-        echo "  为什么必须主动报错：如果参数被接受但行为不存在，"
-        echo "  本脚本测的正是这个行为，结果会是「假绿」——比编译失败更危险。"
-        echo
+# ---- 定时器接线层单测：IdleScanner（把 TimerQueue 粘到连接上那一层）----
+# 和上面的 timer_test 分成两个二进制：算法层对了不代表接线层对了。
+# 典型接线 bug：touch 变成「新增」而不是「刷新」、collect 后没从定时器摘除、
+# timeout=0 没真正关闭。这些在 timer_test 里全都测不到。
+SCANNER_UNIT="$ROOT/test/unit/idle_scanner_test.cpp"
+if [ -f "$SCANNER_UNIT" ]; then
+    info "编译 IdleScanner 单元测试..."
+    if ! g++ -std=c++17 -Wall -Wextra -Werror \
+            -I "$ROOT/lib" -I "$ROOT/src/timer" \
+            "$SCANNER_UNIT" -o "$TMPDIR_T/scanner_unit" >"$TMPDIR_T/scanner_unit_build.log" 2>&1; then
+        echo "  ✗ IdleScanner 单元测试编译失败："
+        sed 's/^/      /' "$TMPDIR_T/scanner_unit_build.log" | head -20
         exit 2
     fi
-    echo "  ✗ bench_server 启动探针失败："
+    if ! "$TMPDIR_T/scanner_unit" >"$TMPDIR_T/scanner_unit_run.log" 2>&1; then
+        echo "  ✗ IdleScanner 单元测试失败（接线层就不对，跑集成测试只会拿到一堆假现象）："
+        grep -E 'FAIL|pass=' "$TMPDIR_T/scanner_unit_run.log" | sed 's/^/      /' | head -20
+        exit 1
+    fi
+    pass "IdleScanner 通过（$(grep -o 'pass=[0-9]*' "$TMPDIR_T/scanner_unit_run.log" | head -1)）"
+else
+    info "跳过 IdleScanner 单元测试（$SCANNER_UNIT 不存在）"
+fi
+
+# 服务端是否真的实现了空闲超时（还没实现时给出明确提示，而不是一串莫名 FAIL）
+#
+# ★ 这个探针必须带 timeout：
+#   未实现时 bench_server 会主动返回 2（很快）；
+#   实现之后它会**真的起服务永久运行** —— 不带 timeout 就是脚本自己卡死在这里，
+#   而且症状是一句输出都没有，比 FAIL 更难查。
+#   timeout 触发（退出码 124）恰恰说明「服务起来了」= 功能已实现，属于通过。
+#
+# 判定表：
+#   退出码 0/1/124  → 已经起来了 / 跑到被我们掐掉 → 功能存在
+#   退出码 2 且日志有 not implemented → 明确未实现
+#   其它            → 真正的启动错误
+PROBE_RC=0
+timeout 2 "$BIN" --port=1 --idle-timeout=1 >"$TMPDIR_T/probe_arg.log" 2>&1 || PROBE_RC=$?
+
+if [ "$PROBE_RC" -eq 2 ] && grep -qi 'not implemented\|unknown arg' "$TMPDIR_T/probe_arg.log"; then
+    echo
+    echo "  ✗ 服务端还没有实现空闲超时（阶段 7.2）。"
+    echo
+    echo "  需要做两件事："
+    echo
+    echo "  ① 在 src/ 侧加接口（签名必须与 bench_server 的探测一致）："
+    echo "       // server/tcp_server.hpp  —— TcpServerBase"
+    echo "       virtual void set_idle_timeout(std::chrono::milliseconds ms) {"
+    echo "           _idle_ms = ms;   // 0 = 关闭"
+    echo "       }"
+    echo "       protected: std::chrono::milliseconds _idle_ms{30000};"
+    echo
+    echo "  ② 在 Epoll_server 里真正用起来："
+    echo "       · Connection 加 steady_clock::time_point _last_active（构造时 now()）"
+    echo "       · recv>0 和 send 成功两处 touch()"
+    echo "       · run_loop 的 dispatch 之后调 evict_idle()"
+    echo "       · evict_idle：持锁收集过期 fd → 放锁 → 逐个 del_and_close"
+    echo
+    echo "  为什么必须主动报错：如果参数被接受但行为不存在，"
+    echo "  本脚本测的正是这个行为，结果会是「假绿」——比编译失败更危险。"
+    echo
+    exit 2
+elif [ "$PROBE_RC" -ne 0 ] && [ "$PROBE_RC" -ne 1 ] && [ "$PROBE_RC" -ne 124 ]; then
+    echo "  ✗ bench_server 启动探针失败（退出码 $PROBE_RC）："
     sed 's/^/      /' "$TMPDIR_T/probe_arg.log"
     exit 2
 fi
+# 退出码 124 = 被 timeout 掐掉 = 它真的在服务，说明 --idle-timeout 已被接受
+info "能力探测通过（退出码 $PROBE_RC$( [ "$PROBE_RC" -eq 124 ] && echo '，服务已在运行' )）"
 
 # =============================================================================
 # [1] 该杀的杀掉 —— epoll（及未来的主从 reactor）
@@ -432,7 +479,7 @@ if [ "$FAILED" -eq 0 ]; then
     echo "  主从 reactor 落地时，这一章只需改一处："
     echo "    每个 Sub Reactor 线程自己扫自己的 _conns（单线程内无需加锁），"
     echo "    Main 线程只负责 accept 并分发，不碰定时器。"
-    echo "    这正是 `one loop per thread` 比全局扫描优越的地方："
+    echo "    这正是 'one loop per thread' 比全局扫描优越的地方："
     echo "    没有跨线程 uint64 时间戳可见性问题，也没有共用锁的伪共享。"
     echo
     echo "  下一步（按依赖顺序）："

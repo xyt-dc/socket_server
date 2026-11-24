@@ -13,13 +13,14 @@
 #include <netinet/in.h>
 #include <unistd.h>
 #include "frame.hpp"
+#include "timer/timer_types.hpp"   // TimerPoint / TimerClock：_last_active 的类型来源
 #include <chrono>
 
 
 
 class Connection{
 public:
-    explicit Connection(int fd) noexcept:_fd(fd),_last_active(std::chrono::steady_clock::now()){}
+    explicit Connection(int fd) noexcept:_fd(fd),_last_active(TimerClock::now()){}
     ~Connection(){
         closed_fd();
     }
@@ -114,6 +115,26 @@ public:
         }
     }
 
+    /**
+     * @brief 标记「这条连接刚刚活跃过」
+     *
+     * ★ 调用点必须是「读写真的成功了」的那一刻，不是「准备去读写」：
+     *   recv > 0 / send > 0 / wbuf_retrieve 之后。
+     *   只在 recv 刷 → 「只推不读」的订阅类连接会被误杀。
+     *
+     * ★ 本函数不是线程安全的（_last_active 是普通 time_point）。
+     *   跨线程刷新必须由连接所属的 reactor/worker 串行执行，
+     *   不能指望这里加锁 —— 加锁只能保证不撕裂，保证不了「谁最后写」。
+     */
+    void touch() noexcept{
+        _last_active = TimerClock::now();
+    }
+
+    /** @brief 上次活跃时刻，仅供 IdleScanner 的所属线程读取 */
+    TimerPoint last_active() const noexcept{
+        return _last_active;
+    }
+
     bool closed() const noexcept{
         std::lock_guard<std::mutex> lk (_wmtx);
         return _fd < 0;
@@ -131,12 +152,7 @@ private:
     size_t _woff;
     std::string _wbuf;
     TLVDecoder _decoder;
-    std::chrono::steady_clock::time_point _last_active;
-    void touch() noexcept{
-        _last_active = std::chrono::steady_clock::now();
-    }
-    std::chrono::steady_clock::time_point last_active() const noexcept{
-        return _last_active;
-    }
+    TimerPoint _last_active;   // 用 TimerPoint(=steady_clock) 而不是自己写一遍类型：
+                               // 一旦有人改成 system_clock，NTP 校时会集体误杀
     mutable std::mutex _wmtx;
 };

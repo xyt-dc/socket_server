@@ -1,5 +1,5 @@
 /**
-    timer_types.hpp —— 所有定时器共用的「时钟口径」
+    timer_types.hpp —— 所有定时器的基类
 
     为什么单独一个文件？
       四种定时器（scan / heap / rbtree / wheel）内部结构完全不同，
@@ -36,8 +36,8 @@ using TimerDuration = TimerClock::duration;
  * 定时器内部只认绝对时间点，不认剩余时长 ——
  * 剩余时长每读一次就已经过期了，存它就是失真。
  */
-inline TimerPoint timer_deadline(std::chrono::milliseconds ms) noexcept {
-    return TimerClock::now() + ms;
+inline TimerPoint timer_deadline(std::chrono::milliseconds x_ms) noexcept {
+    return TimerClock::now() + x_ms;
 }
 
 /**

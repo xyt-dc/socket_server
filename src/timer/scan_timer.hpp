@@ -40,7 +40,7 @@
 
 #pragma once
 
-#include "timer_queue.hpp"
+#include "timer_base.hpp"
 
 #include <unordered_map>
 #include <utility>
@@ -80,6 +80,8 @@ public:
     }
 
     std::size_t size() const noexcept override { return _map.size(); }
+
+    void clear() noexcept override { _map.clear(); }
 
     const char* name() const noexcept override { return "scan"; }
 

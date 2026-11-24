@@ -77,6 +77,16 @@ public:
     /** @brief 当前有效记录数（用于泄漏检测，四种实现都必须能 O(1) 或 O(n) 给出精确值） */
     virtual std::size_t size() const noexcept = 0;
 
+    /**
+     * @brief 丢弃全部记录，不回调
+     *
+     * 唯一用途：IdleScanner 从「超时关闭(timeout=0)」切回「开启」时清掉旧记录。
+     * 关闭期间 add/cancel 都是 no-op，表里可能还留着关闭前的 deadline，
+     * 重新开启后会立刻被扫到 → 「刚开启就批量踢人」。
+     * 注意它不等于「让全部到期」，不产生任何回调。
+     */
+    virtual void clear() noexcept = 0;
+
     /** @brief 实现名，供日志 / --timer= 回显 */
     virtual const char* name() const noexcept = 0;
 };

@@ -11,6 +11,7 @@
 #include <cstring>
 #include "Connection.hpp"
 #include "epoll.hpp"
+#include "timer/idle_scanner.hpp"   // 空闲超时：TimerQueue 的接线层
 #include <chrono>
 #include <cerrno>
 #include <fcntl.h>
@@ -83,6 +84,27 @@ public:
         if(_wake_fd >= 0){::close(_wake_fd);_wake_fd = -1;}
     }
 
+    /**
+     * @brief 覆盖基类：除了记下阈值，还要同步给扫描器
+     *
+     * ★ 必须在 start() 之前调用（bench_server 就是这个顺序）。
+     *   如果 run_loop 已经跑起来再改，已经在定时器里的旧 deadline 不会跟着变，
+     *   所以这里同时转发给 _scanner。
+     */
+    void set_idle_timeout(std::chrono::milliseconds ms) override{
+        TcpServerBase::set_idle_timeout(ms);
+        if (_scanner) _scanner->set_timeout(ms);
+    }
+
+    /**
+     * @brief 空闲超时是否真的生效
+     *
+     * ★ 用来消灭缺陷 C（假通过）：bench_server 以前只探测「有没有
+     *   set_idle_timeout 这个方法」，而基类早就有了 → 探测永远为真。
+     *   现在改成探测这个，没接线就是 false，06_timer.sh 才能真的红。
+     */
+    bool supports_idle_timeout() const noexcept{ return _scanner != nullptr; }
+
     void send_wbuf (int __fd,const void* __data,size_t __n)override{
         if(__fd < 0 || __data == nullptr || __n == 0) return;
 
@@ -140,10 +162,27 @@ protected:
             return;
         }
         _epoll.get()->set_max_events(kMaxEvents);
+
+        // ★ 定时器在这里才真正创建：
+        //   --idle-timeout 在 start() 之前就设好了，构造期 _idle_ms 已是对的。
+        //   构造期建 scanner 也能工作，但 run_loop 里建保证「定时器活在 reactor 线程」。
+        _scanner = std::make_unique<IdleScanner>(
+            std::make_unique<ScanTimer>(), _idle_ms);
+
+        // 下一轮该扫的时间点。用它而不是「每轮都扫」：
+        // epoll_wait 可能因为收到数据而频繁返回，每轮扫 = 高频空转。
+        TimerPoint next_scan = TimerClock::now() + kTimerTick;
+
         while(_running){
             //查看有多少活跃事件并返回
             ssize_t n = _epoll.get()->wait(event_poll,kWaitTimeOut);
-            if (n<0)break;
+            if (n < 0) {
+                // ★ 缺陷 K：EINTR 不是错误（信号打断而已）。
+                //   原来直接 break -> 一个无关信号就能让整个 reactor 退出，
+                //   而 _running 还是 true，外面看起来「服务在跑但没反应」。
+                if (errno == EINTR) continue;
+                break;
+            }
             for(ssize_t i = 0; i < n;++i){
                 int fd = event_poll[i].data.fd;
                 const uint32_t ev = event_poll[i].events;
@@ -180,6 +219,13 @@ protected:
                 //   同一个 fd 完全可能同时可读可写
                 if (ev & EPOLLIN)  handle_read(fd);
                 if (ev & EPOLLOUT) handle_write(fd);
+            }
+
+            // ---- 定时扫描：到点才扫，不是每轮都扫 ----
+            const TimerPoint now = TimerClock::now();
+            if (now >= next_scan) {
+                evict_idle(now);
+                next_scan = now + kTimerTick;
             }
             //while (_pool.try_run_one())
         }
@@ -242,6 +288,11 @@ private:
             nwritten = ::send(conn_ptr->fd(), static_cast<const char*>(__data) + (__n - remaining), remaining, MSG_NOSIGNAL);
             if (nwritten > 0) {
                 remaining -= static_cast<size_t>(nwritten);
+                // ★ 刷新点 ②：send 真的发出去字节了
+                //   这一处漏掉，「只推不读」的订阅类连接会被活活误杀 ——
+                //   它一直在收通知，但从不发数据，只在 recv 刷就永远不会被刷。
+                conn_ptr->touch();
+                if (_scanner) _scanner->touch(conn_ptr->fd());
             } else if (nwritten == 0) {
                 // ★ send 返回 0 在 TCP 上意味着无法推进，继续循环就是死转
                 //   （remaining 不变）。当成错误处理。
@@ -321,6 +372,11 @@ private:
             }
             if(!_epoll.get()->add(cfd)){
                 del_and_close(cfd);
+            }else if (_scanner){
+                // ★ 新连接一建就进定时器，不能等第一次 recv 才注册：
+                //   「连上但一直不说话」的连接永远不会有 recv，
+                //   不在这里注册就永远不会被扫到 → 06_timer.sh 阶段 [1] 必红。
+                _scanner->touch(cfd);
             }
         }
     }
@@ -337,7 +393,6 @@ private:
             if (n > 0) {
                 budget = (static_cast<size_t>(n) >= budget) ? 0
                                                            : budget - static_cast<size_t>(n);
-
                 /**
                  * 这里注意一下，使用RPC后不只有原来的内核缓冲区了，现在是内核缓冲区➕TLVDecoder内的缓冲区
                  * 内核缓冲区只能按照TCP协议保证字节顺序不乱，字节不丢，至于这是不是一帧它并不知道，所以新创立一个decoder来存半帧的情况
@@ -350,6 +405,9 @@ private:
                     if(it == _conns.end())return;
                     conn = it->second;
                 }
+                // ★ 刷新点 ①：recv 真的读到字节了
+                conn->touch();
+                if (_scanner) _scanner->touch(fd);
                 conn->decoder().appendData(buf,static_cast<size_t>(n));
 
                 FrameHeader hdr;
@@ -469,6 +527,11 @@ private:
             ssize_t n = ::send(fd, static_cast<const char*>(conn_ptr->wbuf_data()),conn_ptr->wbuf_size(), MSG_NOSIGNAL);
             if(n>0){
                 conn_ptr->wbuf_retrieve(static_cast<size_t>(n));
+                // ★ 刷新点 ③：EPOLLOUT 驱动的冲刷也算活跃
+                //   这里的 n>0 是「积压数据终于发出去了」，
+                //   典型场景：客户端读得慢，一段时间后恢复。
+                conn_ptr->touch();
+                if (_scanner) _scanner->touch(fd);
                 continue;
             }else{
                 if(errno == EAGAIN){
@@ -491,9 +554,56 @@ private:
     } 
 
     void del_and_close(int fd){
+        // ★ 先摘定时器记录，再关 fd。顺序很重要：
+        //   fd 关掉后号会被内核复用，若定时器里还留着旧记录，
+        //   下一次扫描会把这个号「踢」一次 —— 而它现在是别人的连接。
+        //   （evict_idle 路径下 collect 已经摘过，这里返回 false，无害）
+        if (_scanner) _scanner->remove(fd);
+
         _epoll.get()->del(fd);
         std::lock_guard<std::mutex> lk (_mtx);
         _conns.erase(fd);
+    }
+
+    /**
+     * ★ 空闲连接回收 —— 全项目最容易写错的一段，只有 6 行核心逻辑
+     *
+     * 正确顺序（记住这条主线，其他都是注释）：
+     *     持锁只读收集  →  放锁  →  逐个 del_and_close
+     *
+     * 为什么不能持锁调 del_and_close（两个具体后果）：
+     *   ① 死锁：del_and_close 内部要 lock_guard(_mtx)，
+     *      而 std::mutex 不可重入 —— 同一个线程第二次 lock 就是永久自锁，
+     *      整个 reactor 当场停摆（进程在、CPU 0%、端口还在 listen）。
+     *   ② 迭代器失效 / 崩溃：就算换成 recursive_mutex 让它不死锁，
+     *      你在遍历 _conns 的过程中 erase 当前元素，
+     *      被删元素的迭代器立即失效，下一次 ++it 就是 UB。
+     *
+     * 为什么定时器里已经摘掉了还要再 del_and_close：
+     *   collect() 只负责「定时器不再盯着这个 fd」，fd 还开着、还在 epoll 里、
+     *   还在 _conns 里。不在这里关掉就是 fd 泄漏。
+     *
+     * 放锁后 fd 可能已被别人删掉（worker 的 flush 发现 EPIPE 也会调
+     * del_and_close）。del_and_close 本身是幂等的（epoll_ctl DEL 失败
+     * 只是返回错误、_conns.erase 不存在的 key 也安全），所以重复删除无害。
+     */
+    void evict_idle(TimerPoint now){
+        if (!_scanner || !_scanner->enabled()) return;
+
+        // ---- ① 持锁只读收集 ----
+        // 局部 vector，生命周期只到函数结束；锁的范围严格止于收集完。
+        IdleScanner::IdList expired;
+        {
+            std::lock_guard<std::mutex> lk(_mtx);
+            _scanner->collect(now, expired);
+        }
+        if (expired.empty()) return;
+
+        // ---- ② 放锁，逐个删 ----
+        // 这里 _mtx 已经释放，del_and_close 里再 lock 完全没问题。
+        for (int fd : expired) {
+            del_and_close(fd);
+        }
     }
 
     // ★ 成员声明顺序 = 构造顺序，析构顺序相反。
@@ -505,6 +615,10 @@ private:
     //map用于通过文件描述符（fd）快速查找对应 epoll_item（监听事件）的关联结构。
     std::unordered_map<int,std::shared_ptr<Connection>> _conns;
     std::mutex _mtx;
+
+    // 空闲超时扫描器。只在 reactor 线程里读写（start 之前配置除外），
+    // 和 wbuf / epoll_ctl 一样属于「reactor 独占资源」。
+    std::unique_ptr<IdleScanner> _scanner;
 
     // 分片业务线程池：_pools[i] 只有一个 worker，负责 fd % N == i 的连接
     std::vector<std::unique_ptr<IoThreadPool>> _pools;
