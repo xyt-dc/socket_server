@@ -53,6 +53,30 @@
             },
             "group": "test",
             "problemMatcher": []
+        },
+        // ====================================================================
+        //  ⑥ 调试配置专用的预构建任务
+        //
+        //  ★ 为什么不用 "CMake: build"：
+        //    那是 CMake Tools 插件【内置】的任务名，只有当工作区已经
+        //    Configure 过、且插件的 task provider 激活时才会出现。
+        //    没 Configure 时 F5 就报「找不到任务 CMake: build」。
+        //    自己定义一个明确名字，不依赖插件状态，永远可用。
+        //
+        //  ★ 为什么是全量 build 而不是只 build 当前 target：
+        //    tasks.json 里拿不到「当前选中的 CMake target」这个变量。
+        //    cmake --build 是增量构建，没改动的文件不会重编，
+        //    实测 5 个单测全量也只要 1~2 秒。
+        // ====================================================================
+        {
+            "label": "build 所有 target（调试前预构建）",
+            "type": "shell",
+            "command": "cmake --build build -j",
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "group": "build",
+            "problemMatcher": ["$gcc"]
         }
     ]
 }

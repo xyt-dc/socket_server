@@ -1,0 +1,67 @@
+# ---------------------------------------------------------------------------
+# gdb 调试脚本：观察 IdleScanner / ScanTimer 的内部状态
+#
+# 用法（在仓库根目录执行）：
+#   g++ -std=c++17 -g -O0 -Isrc/timer test/unit/idle_scanner_test.cpp -o /tmp/is_dbg
+#   gdb -q -batch -x test/debug/gdb_idle_scanner.cmds /tmp/is_dbg
+#
+# 交互式更好用（可以反复 continue / 单步）：
+#   gdb -q -x test/debug/gdb_idle_scanner.cmds /tmp/is_dbg
+#   然后 (gdb) 里手敲 next / step / continue / print / p _map
+#
+# 【为什么必须 -g -O0】
+#   项目默认构建不带 -g，且这些全是头文件里的 inline 函数。
+#   -O2 下 touch()/collect() 会被内联进调用方，gdb 的 break 会落空。
+#
+# 【三个观测点怎么选】
+#   touch_at  → 看「谁在刷新、刷新成什么时刻」
+#   advance   → 看「整张表现在长什么样」← 最有用
+#   collect   → 看「这一轮收走了谁」
+# ---------------------------------------------------------------------------
+
+set pagination off
+set confirm off
+set debuginfod enabled off
+# 让 print 时自动按真实动态类型展开（否则 *_timer 只显示基类的 _vptr）
+set print object on
+
+# ---- 观测点 1：每次刷新（[1]~[8] 每个用例都会命中很多次）----
+break idle_scanner.hpp:101
+commands
+    silent
+    printf "\n>>> touch_at  id=%d  now=%ldns  _timeout=%ldms\n", \
+           id, now.time_since_epoch().count(), _timeout.count()
+    # 手工算出「到期时刻」，比读 now + _timeout 直观：
+    # deadline = now + timeout，单位 ns；timeout 是 ms 所以 ×1000000
+    printf "    → deadline = %ldns\n", \
+           now.time_since_epoch().count() + _timeout.count() * 1000000
+    continue
+end
+
+# ---- 观测点 2：扫描整张表（最关键）----
+# scan_timer.hpp:67 是 advance() 里 `std::vector<Id> fired;` 那一行
+break scan_timer.hpp:67
+commands
+    silent
+    printf "\n>>> advance(now=%ldns)  表里现有 %ld 条:\n", \
+           now.time_since_epoch().count(), _map.size()
+    # ★ 这一行就能看到全表：{[id] = deadline, ...}
+    print _map
+    continue
+end
+
+# ---- 观测点 3：本轮收走了谁 ----
+break idle_scanner.hpp:120
+commands
+    silent
+    printf "\n>>> collect  进来前 out.size()=%ld\n", out.size()
+    continue
+end
+
+# ---- 跑到该用例失败为止（g_fail != 0 会 return 1，gdb 报异常退出）----
+run
+
+printf "\n========== 程序已结束 ==========\n"
+# 想知道一共有多少条断言通过，直接看全局变量
+print g_pass
+print g_fail

@@ -50,3 +50,40 @@ target_include_directories(bench_server PRIVATE
 )
 
 target_link_libraries(bench_server PRIVATE Threads::Threads)
+
+# ---------------------------------------------------------------------------
+# 单元测试（之前是 test/suites/*.sh 里手写 g++ 编译，现在同时注册成 CMake target）
+#
+# ★ 为什么要注册成 target：
+#   只有这样 IDE 才能"看见"它们。VS Code 装了 CMake Tools 插件后，
+#   每个 target 自动变成可调试目标（相当于 CLion 的体验），
+#   不用为每个文件手写 launch.json 配置。
+#
+# ★ 为什么同时保留 test/suites/*.sh 里的手写 g++：
+#   脚本要跑 -Wall -Wextra -Werror 的严格检查，还要在不装 cmake 的
+#   环境里能跑。两条路互不干扰，产物同名但不在同一目录。
+#
+# ★ 为什么用 -O0 -g：
+#   这些库全是头文件里的 inline 函数。项目默认无 -g 且若开优化，
+#   函数会被内联进调用方，IDE 里打的断点会静默失效。
+# ---------------------------------------------------------------------------
+set(UNIT_TEST_SOURCES
+    test/unit/blocking_queue_test.cpp
+    test/unit/frame_test.cpp
+    test/unit/thread_pool_test.cpp
+    test/unit/timer_test.cpp
+    test/unit/idle_scanner_test.cpp
+)
+
+foreach(unit_src IN LISTS UNIT_TEST_SOURCES)
+    get_filename_component(unit_name ${unit_src} NAME_WE)
+    add_executable(${unit_name} ${unit_src})
+    target_include_directories(${unit_name} PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/lib
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/timer
+    )
+    target_link_libraries(${unit_name} PRIVATE Threads::Threads)
+    # 调试友好：无优化 + 调试符号。单测都很快，不需要 -O2
+    target_compile_options(${unit_name} PRIVATE -g -O0)
+endforeach()

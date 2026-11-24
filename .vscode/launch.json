@@ -112,6 +112,150 @@
                     "ignoreFailures": true
                 }
             ]
+        },
+        // ====================================================================
+        //  ⑥~⑩ 单测调试：每个测试一个固定配置
+        //
+        //  ★ 为什么不共用一个「调试当前 target」配置：
+        //    ${command:cmake.launchTargetPath} 读的是状态栏里那个【隐藏状态】。
+        //    忘了切 target，就会跑成别的程序 —— 而你在当前文件里打的断点
+        //    在别的二进制里根本不存在，现象就是「程序一闪全跑完，断点没停」。
+        //    这种失败【不报错】，最难查。所以每个测试写死路径。
+        //
+        //  ★ 用法：打开测试文件 → 打红点 → F5 → 选对应的 ⑥/⑦/⑧/⑨/⑩
+        //
+        //  ★ 调试时想「看某条断言之前发生了什么」，就在那条 CHECK 上一行打断点，
+        //    命中后在 DEBUG CONSOLE 里：
+        //        -exec print s._timeout
+        //        -exec print _map      （断点停在 ScanTimer::advance 里时）
+        //
+        //  ★ 每个 target 在 CMakeLists.txt 里都加了 -g -O0，
+        //    否则头文件里的 inline 函数会被内联，断点静默失效。
+        // ====================================================================
+        {
+            "name": "⑥ 单测 idle_scanner（44 断言）",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/build/idle_scanner_test",
+            "args": [],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}",
+            "environment": [],
+            "externalConsole": false,
+            "MIMode": "gdb",
+            "setupCommands": [
+                {
+                    "description": "开启 STL 容器美化输出（unordered_map 显示成 [id]=deadline）",
+                    "text": "-enable-pretty-printing",
+                    "ignoreFailures": true
+                },
+                {
+                    "description": "关闭 debuginfod 自动下载（否则启动卡几秒）",
+                    "text": "set debuginfod enabled off",
+                    "ignoreFailures": true
+                }
+            ],
+            "preLaunchTask": "build 所有 target（调试前预构建）"
+        },
+        {
+            "name": "⑦ 单测 timer（33 断言）",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/build/timer_test",
+            "args": [],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}",
+            "environment": [],
+            "externalConsole": false,
+            "MIMode": "gdb",
+            "setupCommands": [
+                {
+                    "description": "开启 STL 容器美化输出",
+                    "text": "-enable-pretty-printing",
+                    "ignoreFailures": true
+                },
+                {
+                    "description": "关闭 debuginfod 自动下载",
+                    "text": "set debuginfod enabled off",
+                    "ignoreFailures": true
+                }
+            ],
+            "preLaunchTask": "build 所有 target（调试前预构建）"
+        },
+        {
+            "name": "⑧ 单测 frame（TLV 协议）",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/build/frame_test",
+            "args": [],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}",
+            "environment": [],
+            "externalConsole": false,
+            "MIMode": "gdb",
+            "setupCommands": [
+                {
+                    "description": "开启 STL 容器美化输出",
+                    "text": "-enable-pretty-printing",
+                    "ignoreFailures": true
+                },
+                {
+                    "description": "关闭 debuginfod 自动下载",
+                    "text": "set debuginfod enabled off",
+                    "ignoreFailures": true
+                }
+            ],
+            "preLaunchTask": "build 所有 target（调试前预构建）"
+        },
+        {
+            "name": "⑨ 单测 blocking_queue",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/build/blocking_queue_test",
+            "args": [],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}",
+            "environment": [],
+            "externalConsole": false,
+            "MIMode": "gdb",
+            "setupCommands": [
+                {
+                    "description": "开启 STL 容器美化输出",
+                    "text": "-enable-pretty-printing",
+                    "ignoreFailures": true
+                },
+                {
+                    "description": "关闭 debuginfod 自动下载",
+                    "text": "set debuginfod enabled off",
+                    "ignoreFailures": true
+                }
+            ],
+            "preLaunchTask": "build 所有 target（调试前预构建）"
+        },
+        {
+            "name": "⑩ 单测 thread_pool",
+            "type": "cppdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/build/thread_pool_test",
+            "args": [],
+            "stopAtEntry": false,
+            "cwd": "${workspaceFolder}",
+            "environment": [],
+            "externalConsole": false,
+            "MIMode": "gdb",
+            "setupCommands": [
+                {
+                    "description": "开启 STL 容器美化输出",
+                    "text": "-enable-pretty-printing",
+                    "ignoreFailures": true
+                },
+                {
+                    "description": "关闭 debuginfod 自动下载",
+                    "text": "set debuginfod enabled off",
+                    "ignoreFailures": true
+                }
+            ],
+            "preLaunchTask": "build 所有 target（调试前预构建）"
         }
     ]
 }
